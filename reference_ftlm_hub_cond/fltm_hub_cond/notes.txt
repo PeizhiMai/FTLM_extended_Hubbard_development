@@ -1,0 +1,153 @@
+This is a code for calculation of finite-temperature optical
+conductivity of a 2d Hubbard model with Finite-Temperature Lanczos
+Method (FTLM).  It is compact and has been changing rapidly in the
+past from one application to another. It is therefore not completely
+cleaned, properly documented or optimised. Please send any
+questions/inquires/suggestions to "jure.kokalj@ijs.si".
+
+The main fortran program (based on old fortran f77 code) is the file
+"hubTri2Dcond_omp.f".  At the time of writing this notes, intel
+fortran compiler was used.
+
+===========================================
+hubTri2Dcond_omp.f
+-----------------------------------------------------
+The model is defined on anisotropic triangular lattice with
+n.n. hopping $t$ in two directions and $t'$ in third
+direction. Setting $t'=0$ makes the model equivalent to the model on
+square lattice. Periodic and twisted boundary conditions (TBC) are
+implemented.
+
+The cluster specific parameters are:
+lx1, ly1, lx2, ly2 - determine
+the shape and size of a cluster nnf, nca, npa - determine the number
+of fermions, number of total states and number of parent states of a
+largest symmetry sector (total z-component of spin, translation with
+corresponding wave vector in 1st Brillouin zone BZ). (nnf, nca, npa)
+would correspond to sector of 1st Lanczos procedure and (nnfa, ncaq,
+npaq) to the sector of 2nd Lanczos procedure. In our case these are
+the same.
+
+For calculation of a chosen system size, appropriate parameters need
+to be uncommented.  E.g. for 8 sites:
+c------------------------------------------------------
+c 8 sites systems parameter (lx1=4,ly1=0, lx2=-1, ly2=2) !frustrated
+parameter ( nnf=8, nca=4900, npa=628, rhf=1.0,rnop=1.0 ) parameter (
+nnfq=8, ncaq=4900, npaq=628, rhfq=1.0 )
+c------------------------------------------------------
+
+Maximal number of Lanczos steps is given with lstmax. 
+
+Hoping parameter $t$ and $t'$ named ct and ct1 and set with:       
+      data ct, ct1/ 1.0d0,  0.0d0/
+
+Hubbard interaction parameter cu is set by:
+      data cu /12.0d0/
+
+Name of the file to store raw data in is set by ndf:
+      data ndf /'n08u120tp00.dat'/
+
+Number of TBC phases is determined with:
+     data ndkl /2/ 
+     data idkmin, idkmax /1,2/ !TBC phases
+
+
+Number of starting Lanczos random vectors is determined by:
+      data nsmp /4/
+      data ismpmin, ismpmax /1,4/ !samples over random vectors.
+
+Raw data are stored in local folder "./hubTri2Dconddata/" and so it
+needs to be created before running the code.
+
+The program goes over different number of fermions (nf),
+over different number of up and down spins (nu,nd),
+over points in BZ (ik),
+over phases of TBC (idk),
+and over initial random vector samples (ismp).
+
+For each case it does 1st lanczos procedure from random starting
+vector, 2nd lanczos from the current operator on random starting
+vector, and calculates current and tau (kinetic energy like operator)
+matrix elements and store them, together with other need data in data
+file.
+
+The cases of matrix-vector and vector-vector multiplication are
+parallelised with OMP.
+
+An example of shell compilation and execution script is in file
+"hubTri2Dcond_omp.sh".  Some output is redirected to log file
+"hubTri2Dcond_omp.log".
+
+The raw data needs to be analysed and further processed with the code
+in "cond_spect_omp.f".
+
+============================================
+cond_spect_omp.f
+-------------------------------------------------------
+This code creates plottable files and stores them in a local folder
+"./hubTri2Dcondres/" so this folder needs to be created before running
+the code.
+
+One needs to set number of TBCs and number of samples (initial
+random vectors) used or calculated with:
+      parameter (nfididk=2) !number of diff. phases in file names
+      parameter (nfidsmp=4) !number of diff. samples for phase (file names)
+
+Further, the name of the data files needs to be given:
+      data ndf /'n08u120tp00'/
+
+Additional parameters are:
+      parameter (nmu=61) - number of different chemical potential
+      			   	     	  values calculated 
+      parameter(dmumin=-4.d0, dmumax=6.d0) - range of chemical potential 
+      parameter (ntt=50)  - number of different temperatures to calculate
+      parameter (ttmin=0.1d0, ttmax=10.1d0)  - range of temperature values
+      parameter (nchan=4001) - number of frequency bins (channels) to store weight of frequency delta function of optical conductivity
+      parameter (eta=0.05d0)  - broadening of delta peaks
+      parameter (nchan2=4001) - number frequency points for eta-broadened conduct
+      parameter (ommin2=-20.d0, ommax2=20.0d0)  - frequency range
+
+
+Physical quantities are calculated (vs. temperature) for 7 different
+fermionic density levels given in a list:
+      data dlnfd / 1.d0,0.95d0,0.90d0,0.85d0,0.80d0,0.75d0,0.70d0/
+and are stored in result files indexed with _nfd100_, _nfd101_, ...,
+_nfd106_. Make sure that the chemical potential range captures the
+required density levels in dlnfd.  
+
+Calculation of some quantities/tests has been removed from the code,
+to make it cleaner, but still some remnants (now without any meaning)
+remain. 
+
+Example of compiling and running script is in file
+"cond_spect_omp.sh".
+
+After the "cond_spect_omp.f" finishes, the results are stored in
+folder "./hubTri2Dcondres/" and can be plotted. Example of gnuplot
+file is in "plot.plt"
+
+===========================================
+plot.plt
+------------------------------------------------------
+This is a gnuplot script, which plots some of the quantities. 
+One needs to set 
+filen="n08u120tp00_ndk002"
+to chose which resulting files to plot. "ndk002" means that the number
+of TBC phases used was 2.  
+
+
+The script plots:
+- contour plot of fermionic density vs chemical potential and
+   temperature 
+- tau (kinetic energy like quantity) related to optical sum rule
+- broadened optical conductivity for selected fermionic density 
+- comparison of tau and pure j-j correlation spectral sum rule
+- relative weight of omega=0 delta function from two estimates
+- weight of spectra in channels/bins
+
+
+=============================================
+Best and most reliable results are obtained when convergence with
+number of sites, number of TBC, number of Lanczos starting vector and
+Lanczos steps, broadening, ... is obtained.  
+
