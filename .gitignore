@@ -1,0 +1,4 @@
+.DS_Store
+build/
+tmp_fortran_3x3/
+tmp_fortran_8/
