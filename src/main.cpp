@@ -29,17 +29,26 @@ struct Params {
   int ly = 2;
   double tx = 1.0;
   double ty = 1.0;
+  double tp = 0.0;
+  double phix = 1.0;
+  double phiy = 1.0;
   double u = 8.0;
   double v = 0.0;
   double beta = 2.0;
   double mu_min = -4.0;
   double mu_max = 10.0;
   int mu_count = 61;
-  int samples = 8;
+  int samples = 5;
   int lanczos_steps = 80;
   std::uint64_t seed = 12345;
   std::size_t max_sector_dim = 2000000;
   std::string output = "n_vs_mu.csv";
+  std::string trace_partition_csv;
+  std::string debug_block_csv;
+  int debug_block_nup = -1;
+  int debug_block_ndown = -1;
+  int debug_block_mx = -1;
+  int debug_block_my = -1;
 };
 
 struct StateKey {
@@ -69,7 +78,7 @@ struct CompactHop {
   int parent = -1;
   int shift = -1;
   int sign = 1;
-  double amplitude = 0.0;
+  Complex amplitude = 0.0;
 };
 
 struct ParentData {
@@ -110,17 +119,35 @@ struct LanczosSpectrum {
   int particles = 0;
 };
 
+struct BlockThermo {
+  double z = 0.0;
+  double n_total = 0.0;
+  double min_shifted_energy = std::numeric_limits<double>::infinity();
+};
+
 struct Lattice {
   int lx = 0;
   int ly = 0;
   int sites = 0;
-  std::vector<std::array<int, 4>> neighbors;
+  std::vector<std::array<int, 8>> neighbors;
   std::vector<std::pair<int, int>> unique_bonds;
 };
 
 [[noreturn]] void die(const std::string& message) {
   throw std::runtime_error(message);
 }
+
+extern "C" void zheev_(
+    char* jobz,
+    char* uplo,
+    int* n,
+    Complex* a,
+    int* lda,
+    double* w,
+    Complex* work,
+    int* lwork,
+    double* rwork,
+    int* info);
 
 template <typename T>
 T parse_value(const std::string& text) {
@@ -140,6 +167,9 @@ void print_help(const char* argv0) {
       << "  --ly N                lattice size in y\n"
       << "  --tx X                hopping along x bonds\n"
       << "  --ty Y                hopping along y bonds\n"
+      << "  --tp X                second-neighbor diagonal hopping\n"
+      << "  --phix X              homogeneous x twist in units of 2*pi\n"
+      << "  --phiy Y              homogeneous y twist in units of 2*pi\n"
       << "  --u U                 onsite interaction\n"
       << "  --v V                 nearest-neighbor interaction\n"
       << "  --beta B              inverse temperature\n"
@@ -150,6 +180,14 @@ void print_help(const char* argv0) {
       << "  --lanczos-steps N     Lanczos steps per random vector\n"
       << "  --seed N              random seed\n"
       << "  --max-sector-dim N    abort if a full sector exceeds this size\n"
+      << "  --trace-partition-csv PATH\n"
+      << "                        write per-block FTLM vs ED thermodynamic traces\n"
+      << "  --debug-block-nup N   selected block debug Nup\n"
+      << "  --debug-block-ndown N selected block debug Ndown\n"
+      << "  --debug-block-mx N    selected block debug mx\n"
+      << "  --debug-block-my N    selected block debug my\n"
+      << "  --debug-block-csv PATH\n"
+      << "                        write selected-block FTLM vs ED comparison\n"
       << "  --output PATH         CSV output path\n"
       << "  --help                show this message\n";
 }
@@ -176,6 +214,12 @@ Params parse_args(int argc, char** argv) {
       p.tx = parse_value<double>(next(arg));
     } else if (arg == "--ty") {
       p.ty = parse_value<double>(next(arg));
+    } else if (arg == "--tp") {
+      p.tp = parse_value<double>(next(arg));
+    } else if (arg == "--phix") {
+      p.phix = parse_value<double>(next(arg));
+    } else if (arg == "--phiy") {
+      p.phiy = parse_value<double>(next(arg));
     } else if (arg == "--u") {
       p.u = parse_value<double>(next(arg));
     } else if (arg == "--v") {
@@ -196,6 +240,18 @@ Params parse_args(int argc, char** argv) {
       p.seed = parse_value<std::uint64_t>(next(arg));
     } else if (arg == "--max-sector-dim") {
       p.max_sector_dim = parse_value<std::size_t>(next(arg));
+    } else if (arg == "--trace-partition-csv") {
+      p.trace_partition_csv = next(arg);
+    } else if (arg == "--debug-block-nup") {
+      p.debug_block_nup = parse_value<int>(next(arg));
+    } else if (arg == "--debug-block-ndown") {
+      p.debug_block_ndown = parse_value<int>(next(arg));
+    } else if (arg == "--debug-block-mx") {
+      p.debug_block_mx = parse_value<int>(next(arg));
+    } else if (arg == "--debug-block-my") {
+      p.debug_block_my = parse_value<int>(next(arg));
+    } else if (arg == "--debug-block-csv") {
+      p.debug_block_csv = next(arg);
     } else if (arg == "--output") {
       p.output = next(arg);
     } else {
@@ -217,6 +273,16 @@ Params parse_args(int argc, char** argv) {
   }
   if (p.mu_count < 2) {
     die("--mu-count must be at least 2.");
+  }
+  const bool partial_block_debug =
+      (p.debug_block_nup >= 0) || (p.debug_block_ndown >= 0) ||
+      (p.debug_block_mx >= 0) || (p.debug_block_my >= 0) ||
+      !p.debug_block_csv.empty();
+  const bool full_block_debug =
+      (p.debug_block_nup >= 0) && (p.debug_block_ndown >= 0) &&
+      (p.debug_block_mx >= 0) && (p.debug_block_my >= 0);
+  if (partial_block_debug && !full_block_debug) {
+    die("Selected-block debug requires --debug-block-nup/--debug-block-ndown/--debug-block-mx/--debug-block-my together.");
   }
   return p;
 }
@@ -252,6 +318,10 @@ Lattice build_lattice(int lx, int ly) {
           index((x - 1 + lx) % lx, y),
           index(x, (y + 1) % ly),
           index(x, (y - 1 + ly) % ly),
+          index((x + 1) % lx, (y + 1) % ly),
+          index((x - 1 + lx) % lx, (y + 1) % ly),
+          index((x + 1) % lx, (y - 1 + ly) % ly),
+          index((x - 1 + lx) % lx, (y - 1 + ly) % ly),
       };
       lattice.unique_bonds.push_back({s, index((x + 1) % lx, y)});
       lattice.unique_bonds.push_back({s, index(x, (y + 1) % ly)});
@@ -314,6 +384,41 @@ double fermion_sign_hop(std::uint64_t bits, int from, int to) {
   const std::uint64_t width = static_cast<std::uint64_t>(hi - lo - 1);
   const std::uint64_t mask = ((std::uint64_t{1} << width) - 1ULL) << (lo + 1);
   return (popcount64(bits & mask) & 1) ? -1.0 : 1.0;
+}
+
+Complex twist_phase_for_dir(const Params& params, const Lattice& lattice, int dir) {
+  const double theta_x = 2.0 * kPi * params.phix / static_cast<double>(lattice.lx);
+  const double theta_y = 2.0 * kPi * params.phiy / static_cast<double>(lattice.ly);
+  double angle = 0.0;
+  switch (dir) {
+    case 0:
+      angle = theta_x;
+      break;
+    case 1:
+      angle = -theta_x;
+      break;
+    case 2:
+      angle = theta_y;
+      break;
+    case 3:
+      angle = -theta_y;
+      break;
+    case 4:
+      angle = theta_x + theta_y;
+      break;
+    case 5:
+      angle = -theta_x + theta_y;
+      break;
+    case 6:
+      angle = theta_x - theta_y;
+      break;
+    case 7:
+      angle = -theta_x - theta_y;
+      break;
+    default:
+      die("Invalid hopping direction for twist phase.");
+  }
+  return Complex(std::cos(angle), std::sin(angle));
 }
 
 std::pair<std::uint64_t, int> translate_spin(
@@ -418,37 +523,41 @@ SectorBasis build_sector_basis(const Lattice& lattice, int n_up, int n_down, con
     const StateKey state = parent.representative;
     const auto up_occ = occupied_sites(state.up, lattice.sites);
     for (int from : up_occ) {
-      for (int dir = 0; dir < 4; ++dir) {
+      for (int dir = 0; dir < 8; ++dir) {
         const int to = lattice.neighbors[from][dir];
         if ((state.up >> to) & 1ULL) {
           continue;
         }
-        const double hop = (dir < 2) ? params.tx : params.ty;
+        const double hop = (dir < 2) ? params.tx : ((dir < 4) ? params.ty : params.tp);
+        const Complex twisted_hop =
+            -hop * fermion_sign_hop(state.up, from, to) *
+            twist_phase_for_dir(params, lattice, dir);
         const StateKey target{
             state.up ^ (std::uint64_t{1} << from) ^ (std::uint64_t{1} << to),
             state.down,
         };
         const Relation rel = relations.at(target);
-        parent.hops.push_back(
-            {rel.parent, rel.shift, rel.sign, -hop * fermion_sign_hop(state.up, from, to)});
+        parent.hops.push_back({rel.parent, rel.shift, rel.sign, twisted_hop});
       }
     }
 
     const auto down_occ = occupied_sites(state.down, lattice.sites);
     for (int from : down_occ) {
-      for (int dir = 0; dir < 4; ++dir) {
+      for (int dir = 0; dir < 8; ++dir) {
         const int to = lattice.neighbors[from][dir];
         if ((state.down >> to) & 1ULL) {
           continue;
         }
-        const double hop = (dir < 2) ? params.tx : params.ty;
+        const double hop = (dir < 2) ? params.tx : ((dir < 4) ? params.ty : params.tp);
+        const Complex twisted_hop =
+            -hop * fermion_sign_hop(state.down, from, to) *
+            twist_phase_for_dir(params, lattice, dir);
         const StateKey target{
             state.up,
             state.down ^ (std::uint64_t{1} << from) ^ (std::uint64_t{1} << to),
         };
         const Relation rel = relations.at(target);
-        parent.hops.push_back(
-            {rel.parent, rel.shift, rel.sign, -hop * fermion_sign_hop(state.down, from, to)});
+        parent.hops.push_back({rel.parent, rel.shift, rel.sign, twisted_hop});
       }
     }
   }
@@ -578,6 +687,72 @@ void apply_hamiltonian(
                 in[static_cast<std::size_t>(block.col_idx[static_cast<std::size_t>(edge)])];
     }
   }
+}
+
+std::vector<double> diagonalize_block_exact(const MomentumBlock& block) {
+  int n = static_cast<int>(block.basis_dim);
+  if (n == 0) {
+    return {};
+  }
+  if (n == 1) {
+    double eigenvalue = block.diagonal[0];
+    for (int edge = block.row_ptr[0]; edge < block.row_ptr[1]; ++edge) {
+      if (block.col_idx[static_cast<std::size_t>(edge)] == 0) {
+        eigenvalue += block.values[static_cast<std::size_t>(edge)].real();
+      }
+    }
+    return {eigenvalue};
+  }
+
+  std::vector<Complex> dense(static_cast<std::size_t>(n) * static_cast<std::size_t>(n), 0.0);
+  for (int i = 0; i < n; ++i) {
+    dense[static_cast<std::size_t>(i) + static_cast<std::size_t>(i) * static_cast<std::size_t>(n)] =
+        block.diagonal[static_cast<std::size_t>(i)];
+    for (int edge = block.row_ptr[static_cast<std::size_t>(i)];
+         edge < block.row_ptr[static_cast<std::size_t>(i + 1)];
+         ++edge) {
+      const int j = block.col_idx[static_cast<std::size_t>(edge)];
+      dense[static_cast<std::size_t>(i) + static_cast<std::size_t>(j) * static_cast<std::size_t>(n)] +=
+          block.values[static_cast<std::size_t>(edge)];
+    }
+  }
+
+  for (int j = 0; j < n; ++j) {
+    const std::size_t jj = static_cast<std::size_t>(j);
+    dense[jj + jj * static_cast<std::size_t>(n)] =
+        Complex(dense[jj + jj * static_cast<std::size_t>(n)].real(), 0.0);
+    for (int i = 0; i < j; ++i) {
+      const std::size_t idx_ij = static_cast<std::size_t>(i) + jj * static_cast<std::size_t>(n);
+      const std::size_t idx_ji = jj + static_cast<std::size_t>(i) * static_cast<std::size_t>(n);
+      const Complex avg = 0.5 * (dense[idx_ij] + std::conj(dense[idx_ji]));
+      dense[idx_ij] = avg;
+      dense[idx_ji] = std::conj(avg);
+    }
+  }
+
+  std::vector<double> eigenvalues(static_cast<std::size_t>(n), 0.0);
+  std::vector<double> rwork(static_cast<std::size_t>(std::max(1, 3 * n - 2)), 0.0);
+  int lda = n;
+  int lwork = -1;
+  int info = 0;
+  Complex work_query = 0.0;
+  char jobz = 'N';
+  char uplo = 'U';
+  zheev_(&jobz, &uplo, &n, dense.data(), &lda, eigenvalues.data(),
+         &work_query, &lwork, rwork.data(), &info);
+  if (info != 0) {
+    die("zheev workspace query failed with info=" + std::to_string(info));
+  }
+
+  lwork = std::max(1, static_cast<int>(std::real(work_query)));
+  std::vector<Complex> work(static_cast<std::size_t>(lwork), 0.0);
+  zheev_(&jobz, &uplo, &n, dense.data(), &lda, eigenvalues.data(),
+         work.data(), &lwork, rwork.data(), &info);
+  if (info != 0) {
+    die("zheev diagonalization failed with info=" + std::to_string(info));
+  }
+
+  return eigenvalues;
 }
 
 void jacobi_diagonalize(
@@ -753,6 +928,103 @@ LanczosSpectrum run_ftlm_block(
   return spectrum;
 }
 
+BlockThermo raw_block_thermo_from_ftlm(
+    const LanczosSpectrum& spectrum,
+    double beta,
+    double mu) {
+  BlockThermo thermo;
+  thermo.min_shifted_energy = std::numeric_limits<double>::infinity();
+  for (double eigenvalue : spectrum.eigenvalues) {
+    thermo.min_shifted_energy = std::min(
+        thermo.min_shifted_energy,
+        eigenvalue - mu * static_cast<double>(spectrum.particles));
+  }
+  if (!std::isfinite(thermo.min_shifted_energy)) {
+    return thermo;
+  }
+
+  for (std::size_t i = 0; i < spectrum.eigenvalues.size(); ++i) {
+    const double shifted =
+        spectrum.eigenvalues[i] - mu * static_cast<double>(spectrum.particles) -
+        thermo.min_shifted_energy;
+    const double weight =
+        static_cast<double>(spectrum.basis_dim) * spectrum.sample_weights[i] *
+        std::exp(-beta * shifted);
+    thermo.z += weight;
+    thermo.n_total += static_cast<double>(spectrum.particles) * weight;
+  }
+  return thermo;
+}
+
+BlockThermo raw_block_thermo_from_exact(
+    const std::vector<double>& eigenvalues,
+    int particles,
+    double beta,
+    double mu) {
+  BlockThermo thermo;
+  for (double eigenvalue : eigenvalues) {
+    thermo.min_shifted_energy = std::min(
+        thermo.min_shifted_energy,
+        eigenvalue - mu * static_cast<double>(particles));
+  }
+  if (!std::isfinite(thermo.min_shifted_energy)) {
+    return thermo;
+  }
+
+  for (double eigenvalue : eigenvalues) {
+    const double shifted =
+        eigenvalue - mu * static_cast<double>(particles) - thermo.min_shifted_energy;
+    const double weight = std::exp(-beta * shifted);
+    thermo.z += weight;
+    thermo.n_total += static_cast<double>(particles) * weight;
+  }
+  return thermo;
+}
+
+bool block_matches_debug(
+    const Params& params,
+    int n_up,
+    int n_down,
+    int mx,
+    int my) {
+  return n_up == params.debug_block_nup &&
+         n_down == params.debug_block_ndown &&
+         mx == params.debug_block_mx &&
+         my == params.debug_block_my;
+}
+
+void write_selected_block_debug(
+    const std::string& path,
+    int n_up,
+    int n_down,
+    int mx,
+    int my,
+    const LanczosSpectrum& spectrum,
+    const std::vector<double>& exact_eigenvalues,
+    double beta,
+    const std::vector<double>& mu_values) {
+  std::ofstream out(path);
+  if (!out) {
+    die("Failed to open selected block debug file: " + path);
+  }
+  out << "nup,ndown,mx,my,basis_dim,mu,z_ftlm,z_ed,z_ratio,n_ftlm_total,n_ed_total,n_diff,min_ftlm,min_ed,sum_sample_weights\n";
+  out << std::setprecision(15);
+  const double sum_sample_weights =
+      std::accumulate(spectrum.sample_weights.begin(), spectrum.sample_weights.end(), 0.0);
+  for (double mu : mu_values) {
+    const BlockThermo ftlm = raw_block_thermo_from_ftlm(spectrum, beta, mu);
+    const BlockThermo exact = raw_block_thermo_from_exact(exact_eigenvalues, spectrum.particles, beta, mu);
+    const double z_ratio = (exact.z > 0.0) ? (ftlm.z / exact.z) : 0.0;
+    out << n_up << "," << n_down << "," << mx << "," << my << ","
+        << spectrum.basis_dim << "," << mu << ","
+        << ftlm.z << "," << exact.z << "," << z_ratio << ","
+        << ftlm.n_total << "," << exact.n_total << ","
+        << (ftlm.n_total - exact.n_total) << ","
+        << ftlm.min_shifted_energy << "," << exact.min_shifted_energy << ","
+        << sum_sample_weights << "\n";
+  }
+}
+
 std::vector<double> linspace(double start, double stop, int count) {
   std::vector<double> values(static_cast<std::size_t>(count));
   const double step = (stop - start) / static_cast<double>(count - 1);
@@ -786,6 +1058,10 @@ int main(int argc, char** argv) {
     const Lattice lattice = build_lattice(params.lx, params.ly);
     const std::vector<double> mu_values =
         linspace(params.mu_min, params.mu_max, params.mu_count);
+    const bool trace_blocks = !params.trace_partition_csv.empty();
+    const bool debug_selected_block =
+        params.debug_block_nup >= 0 && params.debug_block_ndown >= 0 &&
+        params.debug_block_mx >= 0 && params.debug_block_my >= 0;
 
     std::cout << "Reference used: "
               << "reference_ftlm_hub_cond/fltm_hub_cond/hubTri2Dcond_omp.f"
@@ -794,7 +1070,8 @@ int main(int argc, char** argv) {
               << params.lx << "x" << params.ly << " rectangular lattice ("
               << lattice.sites << " sites)\n";
     std::cout << "beta=" << params.beta << " U=" << params.u << " V=" << params.v
-              << " tx=" << params.tx << " ty=" << params.ty << "\n";
+              << " tx=" << params.tx << " ty=" << params.ty << " tp=" << params.tp
+              << " phix=" << params.phix << " phiy=" << params.phiy << "\n";
 
     std::mt19937_64 rng(params.seed);
     std::vector<double> densities(mu_values.size(), 0.0);
@@ -803,6 +1080,18 @@ int main(int argc, char** argv) {
         mu_values.size(), std::numeric_limits<double>::infinity());
     std::vector<double> z_scaled(mu_values.size(), 0.0);
     std::vector<double> n_scaled(mu_values.size(), 0.0);
+    std::ofstream trace_out;
+    if (trace_blocks) {
+      trace_out.open(params.trace_partition_csv);
+      if (!trace_out) {
+        die("Failed to open trace CSV: " + params.trace_partition_csv);
+      }
+      trace_out << "nup,ndown,mx,my,particles,basis_dim,mu,"
+                << "z_ftlm,z_ed,z_ratio,n_ftlm_total,n_ed_total,n_total_diff,"
+                << "min_ftlm,min_ed,sum_sample_weights\n";
+      trace_out << std::setprecision(15);
+    }
+    bool wrote_selected_block_debug = false;
 
     for (int n_up = 0; n_up <= lattice.sites; ++n_up) {
       for (int n_down = 0; n_down <= lattice.sites; ++n_down) {
@@ -827,6 +1116,68 @@ int main(int argc, char** argv) {
             }
 
             const LanczosSpectrum spectrum = run_ftlm_block(block, params, rng);
+            const bool need_exact_block =
+                trace_blocks || (debug_selected_block &&
+                                 block_matches_debug(params, n_up, n_down, mx, my));
+            std::vector<double> exact_eigenvalues;
+            if (need_exact_block) {
+              exact_eigenvalues = diagonalize_block_exact(block);
+            }
+
+            if (trace_blocks) {
+              const double sum_sample_weights =
+                  std::accumulate(spectrum.sample_weights.begin(), spectrum.sample_weights.end(), 0.0);
+              for (double mu : mu_values) {
+                const BlockThermo ftlm = raw_block_thermo_from_ftlm(spectrum, params.beta, mu);
+                const BlockThermo exact =
+                    raw_block_thermo_from_exact(exact_eigenvalues, spectrum.particles, params.beta, mu);
+                const double z_ratio = (exact.z > 0.0) ? (ftlm.z / exact.z) : 0.0;
+                trace_out << n_up << "," << n_down << "," << mx << "," << my << ","
+                          << spectrum.particles << "," << spectrum.basis_dim << ","
+                          << mu << "," << ftlm.z << "," << exact.z << "," << z_ratio
+                          << "," << ftlm.n_total << "," << exact.n_total << ","
+                          << (ftlm.n_total - exact.n_total) << ","
+                          << ftlm.min_shifted_energy << "," << exact.min_shifted_energy << ","
+                          << sum_sample_weights << "\n";
+              }
+            }
+
+            if (debug_selected_block && block_matches_debug(params, n_up, n_down, mx, my)) {
+              const double sum_sample_weights =
+                  std::accumulate(spectrum.sample_weights.begin(), spectrum.sample_weights.end(), 0.0);
+              std::cout << "Selected block debug Nup=" << n_up
+                        << " Ndown=" << n_down
+                        << " mx=" << mx
+                        << " my=" << my
+                        << " basis_dim=" << spectrum.basis_dim
+                        << " sum_sample_weights=" << sum_sample_weights << "\n";
+              for (double mu : mu_values) {
+                const BlockThermo ftlm = raw_block_thermo_from_ftlm(spectrum, params.beta, mu);
+                const BlockThermo exact =
+                    raw_block_thermo_from_exact(exact_eigenvalues, spectrum.particles, params.beta, mu);
+                const double z_ratio = (exact.z > 0.0) ? (ftlm.z / exact.z) : 0.0;
+                std::cout << "  debug mu=" << std::setw(12) << mu
+                          << " z_ftlm=" << std::setw(14) << ftlm.z
+                          << " z_ed=" << std::setw(14) << exact.z
+                          << " ratio=" << std::setw(14) << z_ratio
+                          << " n_diff=" << std::setw(14) << (ftlm.n_total - exact.n_total)
+                          << "\n";
+              }
+              if (!params.debug_block_csv.empty()) {
+                write_selected_block_debug(
+                    params.debug_block_csv,
+                    n_up,
+                    n_down,
+                    mx,
+                    my,
+                    spectrum,
+                    exact_eigenvalues,
+                    params.beta,
+                    mu_values);
+                wrote_selected_block_debug = true;
+              }
+            }
+
             for (std::size_t imu = 0; imu < mu_values.size(); ++imu) {
               const double mu = mu_values[imu];
               double block_min = std::numeric_limits<double>::infinity();
@@ -867,6 +1218,10 @@ int main(int argc, char** argv) {
                   << " parents=" << sector.parents.size()
                   << " active_k_dim_sum=" << active_sum << "\n";
       }
+    }
+
+    if (debug_selected_block && !params.debug_block_csv.empty() && !wrote_selected_block_debug) {
+      die("Selected block debug target was not found among active FTLM blocks.");
     }
 
     for (std::size_t imu = 0; imu < mu_values.size(); ++imu) {

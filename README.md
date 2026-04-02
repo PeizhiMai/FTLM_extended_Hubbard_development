@@ -13,6 +13,8 @@ The code currently includes:
 
 - rectangular `lx x ly` lattice with periodic boundary conditions
 - nearest-neighbor hopping `t_x`, `t_y`
+- second-neighbor diagonal hopping `t'`
+- homogeneous twists `phi_x`, `phi_y` in units of `2*pi`
 - onsite interaction `U`
 - nearest-neighbor density interaction `V`
 
@@ -37,10 +39,11 @@ cmake --build build
 ```bash
 ./build/ftlm_n_vs_mu \
   --lx 2 --ly 2 \
-  --tx 1.0 --ty 1.0 \
+  --tx 1.0 --ty 1.0 --tp 0.2 \
+  --phix 1.0 --phiy 1.0 \
   --u 4.0 --v 1.0 \
   --beta 1.5 \
-  --samples 4 \
+  --samples 5 \
   --lanczos-steps 40 \
   --mu-min -2 --mu-max 6 --mu-count 33 \
   --output n_vs_mu.csv
@@ -67,6 +70,8 @@ A separate exact-diagonalization executable is also available:
 ```
 
 This ED path reuses the same fixed-particle sectors and momentum-block construction as the FTLM code, but it diagonalizes each active `(N_up, N_down, k)` block exactly instead of using Lanczos sampling.
+
+The twist parameters `--phix` and `--phiy` are homogeneous twists in units of `2*pi`. The default is `phix=phiy=1`, which is gauge-equivalent to no twist.
 
 ## 4x2 FTLM vs ED Comparison
 
@@ -133,6 +138,8 @@ Current features:
 
 - rectangular periodic lattice `lx x ly`
 - nearest-neighbor hopping `tx`, `ty`
+- second-neighbor diagonal hopping `tp`
+- homogeneous twists `phix`, `phiy`
 - onsite interaction `U`
 - nearest-neighbor density interaction `V`
 - FTLM sampling

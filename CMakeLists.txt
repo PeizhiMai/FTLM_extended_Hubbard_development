@@ -9,11 +9,13 @@ add_executable(ftlm_n_vs_mu
   src/main.cpp
 )
 
+find_package(LAPACK REQUIRED)
+
+target_link_libraries(ftlm_n_vs_mu PRIVATE LAPACK::LAPACK)
+
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
   target_compile_options(ftlm_n_vs_mu PRIVATE -O3 -Wall -Wextra -Wpedantic)
 endif()
-
-find_package(LAPACK REQUIRED)
 
 add_executable(ftlm_ed_n_vs_mu
   src/ed_main.cpp
