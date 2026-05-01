@@ -102,6 +102,29 @@ The output CSV contains:
 - `compressibility = beta * charge_correlation`, equivalent to `d n / d mu`
   in the grand-canonical ensemble
 - `partition_like` as the shifted grand-canonical FTLM sum used internally
+- `log_partition` as the absolute `log(Z)` reconstructed from the shifted sum
+
+For twist averaging, run independent jobs with different `--phix/--phiy`, then
+combine their CSV files:
+
+```bash
+python3 scripts/average_twist_outputs.py \
+  twist_*.csv \
+  --mode observable-average \
+  --output twist_average.csv
+```
+
+`observable-average` is the usual equal-weight average of measured observables
+over twists. If you want to combine the twists by summing their partition
+functions instead, use the absolute `log_partition` column:
+
+```bash
+python3 scripts/average_twist_outputs.py \
+  twist_*.csv \
+  --mode partition-sum \
+  --sites 16 \
+  --output twist_partition_sum.csv
+```
 
 For checkpointing long cluster runs, pass a checkpoint path:
 

@@ -1412,17 +1412,18 @@ void write_results(
     const std::vector<double>& densities,
     const std::vector<double>& charge_correlations,
     const std::vector<double>& compressibilities,
-    const std::vector<double>& partitions) {
+    const std::vector<double>& partitions,
+    const std::vector<double>& log_partitions) {
   std::ofstream out(path);
   if (!out) {
     die("Failed to open output file: " + path);
   }
-  out << "mu,n,charge_correlation,compressibility,partition_like\n";
+  out << "mu,n,charge_correlation,compressibility,partition_like,log_partition\n";
   out << std::setprecision(15);
   for (std::size_t i = 0; i < mu_values.size(); ++i) {
     out << mu_values[i] << "," << densities[i] << ","
         << charge_correlations[i] << "," << compressibilities[i] << ","
-        << partitions[i] << "\n";
+        << partitions[i] << "," << log_partitions[i] << "\n";
   }
 }
 
@@ -1433,12 +1434,13 @@ void write_multi_beta_results(
     const std::vector<std::vector<double>>& densities,
     const std::vector<std::vector<double>>& charge_correlations,
     const std::vector<std::vector<double>>& compressibilities,
-    const std::vector<std::vector<double>>& partitions) {
+    const std::vector<std::vector<double>>& partitions,
+    const std::vector<std::vector<double>>& log_partitions) {
   std::ofstream out(path);
   if (!out) {
     die("Failed to open output file: " + path);
   }
-  out << "beta,mu,n,charge_correlation,compressibility,partition_like\n";
+  out << "beta,mu,n,charge_correlation,compressibility,partition_like,log_partition\n";
   out << std::setprecision(15);
   for (std::size_t ibeta = 0; ibeta < beta_values.size(); ++ibeta) {
     for (std::size_t imu = 0; imu < mu_values.size(); ++imu) {
@@ -1446,7 +1448,8 @@ void write_multi_beta_results(
           << densities[ibeta][imu] << ","
           << charge_correlations[ibeta][imu] << ","
           << compressibilities[ibeta][imu] << ","
-          << partitions[ibeta][imu] << "\n";
+          << partitions[ibeta][imu] << ","
+          << log_partitions[ibeta][imu] << "\n";
     }
   }
 }
@@ -1737,6 +1740,8 @@ int main(int argc, char** argv) {
           params.beta_values.size(), std::vector<double>(mu_values.size(), 0.0));
       std::vector<std::vector<double>> all_partitions(
           params.beta_values.size(), std::vector<double>(mu_values.size(), 0.0));
+      std::vector<std::vector<double>> all_log_partitions(
+          params.beta_values.size(), std::vector<double>(mu_values.size(), 0.0));
 
       for (std::size_t ibeta = 0; ibeta < params.beta_values.size(); ++ibeta) {
         const double beta = params.beta_values[ibeta];
@@ -1764,6 +1769,8 @@ int main(int argc, char** argv) {
 
         for (std::size_t imu = 0; imu < mu_values.size(); ++imu) {
           all_partitions[ibeta][imu] = z_scaled[imu];
+          all_log_partitions[ibeta][imu] =
+              std::log(z_scaled[imu]) - beta * emin_by_mu[imu];
           const double sites = static_cast<double>(lattice.sites);
           const double mean_particles = n_scaled[imu] / z_scaled[imu];
           const double mean_particles_squared = n2_scaled[imu] / z_scaled[imu];
@@ -1787,14 +1794,18 @@ int main(int argc, char** argv) {
           all_densities,
           all_charge_correlations,
           all_compressibilities,
-          all_partitions);
+          all_partitions,
+          all_log_partitions);
     } else {
       std::vector<double> densities(mu_values.size(), 0.0);
       std::vector<double> charge_correlations(mu_values.size(), 0.0);
       std::vector<double> compressibilities(mu_values.size(), 0.0);
       std::vector<double> partitions(mu_values.size(), 0.0);
+      std::vector<double> log_partitions(mu_values.size(), 0.0);
       for (std::size_t imu = 0; imu < mu_values.size(); ++imu) {
         partitions[imu] = single_z_scaled[imu];
+        log_partitions[imu] =
+            std::log(single_z_scaled[imu]) - params.beta * single_emin_by_mu[imu];
         const double sites = static_cast<double>(lattice.sites);
         const double mean_particles = single_n_scaled[imu] / single_z_scaled[imu];
         const double mean_particles_squared =
@@ -1816,7 +1827,8 @@ int main(int argc, char** argv) {
           densities,
           charge_correlations,
           compressibilities,
-          partitions);
+          partitions,
+          log_partitions);
     }
     std::cout << "Wrote " << params.output << "\n";
     return 0;

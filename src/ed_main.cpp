@@ -64,6 +64,7 @@ int main(int argc, char** argv) {
     std::vector<double> charge_correlations(mu_values.size(), 0.0);
     std::vector<double> compressibilities(mu_values.size(), 0.0);
     std::vector<double> partitions(mu_values.size(), 0.0);
+    std::vector<double> log_partitions(mu_values.size(), 0.0);
     std::vector<double> emin_by_mu(
         mu_values.size(), std::numeric_limits<double>::infinity());
     std::vector<double> z_scaled(mu_values.size(), 0.0);
@@ -113,6 +114,8 @@ int main(int argc, char** argv) {
 
     for (std::size_t imu = 0; imu < mu_values.size(); ++imu) {
       partitions[imu] = z_scaled[imu];
+      log_partitions[imu] =
+          std::log(z_scaled[imu]) - params.beta * emin_by_mu[imu];
       const double sites = static_cast<double>(lattice.sites);
       const double mean_particles = n_scaled[imu] / z_scaled[imu];
       const double mean_particles_squared = n2_scaled[imu] / z_scaled[imu];
@@ -132,7 +135,8 @@ int main(int argc, char** argv) {
         densities,
         charge_correlations,
         compressibilities,
-        partitions);
+        partitions,
+        log_partitions);
     std::cout << "Wrote " << params.output << "\n";
     return 0;
   } catch (const std::exception& ex) {
