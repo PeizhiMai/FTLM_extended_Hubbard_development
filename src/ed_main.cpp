@@ -11,7 +11,8 @@ void accumulate_exact_block(
     const std::vector<double>& mu_values,
     std::vector<double>& emin_by_mu,
     std::vector<double>& z_scaled,
-    std::vector<double>& n_scaled) {
+    std::vector<double>& n_scaled,
+    std::vector<double>& n2_scaled) {
   for (std::size_t imu = 0; imu < mu_values.size(); ++imu) {
     const double mu = mu_values[imu];
     double block_min = std::numeric_limits<double>::infinity();
@@ -28,14 +29,17 @@ void accumulate_exact_block(
       const double scale = std::exp(-beta * (emin_by_mu[imu] - block_min));
       z_scaled[imu] *= scale;
       n_scaled[imu] *= scale;
+      n2_scaled[imu] *= scale;
       emin_by_mu[imu] = block_min;
     }
 
     for (double eigenvalue : eigenvalues) {
       const double shifted = eigenvalue - mu * static_cast<double>(particles) - emin_by_mu[imu];
       const double weight = std::exp(-beta * shifted);
+      const double particle_count = static_cast<double>(particles);
       z_scaled[imu] += weight;
-      n_scaled[imu] += static_cast<double>(particles) * weight;
+      n_scaled[imu] += particle_count * weight;
+      n2_scaled[imu] += particle_count * particle_count * weight;
     }
   }
 }
@@ -57,11 +61,14 @@ int main(int argc, char** argv) {
               << " phix=" << params.phix << " phiy=" << params.phiy << "\n";
 
     std::vector<double> densities(mu_values.size(), 0.0);
+    std::vector<double> charge_correlations(mu_values.size(), 0.0);
+    std::vector<double> compressibilities(mu_values.size(), 0.0);
     std::vector<double> partitions(mu_values.size(), 0.0);
     std::vector<double> emin_by_mu(
         mu_values.size(), std::numeric_limits<double>::infinity());
     std::vector<double> z_scaled(mu_values.size(), 0.0);
     std::vector<double> n_scaled(mu_values.size(), 0.0);
+    std::vector<double> n2_scaled(mu_values.size(), 0.0);
 
     for (int n_up = 0; n_up <= lattice.sites; ++n_up) {
       for (int n_down = 0; n_down <= lattice.sites; ++n_down) {
@@ -92,7 +99,8 @@ int main(int argc, char** argv) {
                 mu_values,
                 emin_by_mu,
                 z_scaled,
-                n_scaled);
+                n_scaled,
+                n2_scaled);
           }
         }
 
@@ -105,13 +113,26 @@ int main(int argc, char** argv) {
 
     for (std::size_t imu = 0; imu < mu_values.size(); ++imu) {
       partitions[imu] = z_scaled[imu];
-      densities[imu] =
-          n_scaled[imu] / (static_cast<double>(lattice.sites) * z_scaled[imu]);
+      const double sites = static_cast<double>(lattice.sites);
+      const double mean_particles = n_scaled[imu] / z_scaled[imu];
+      const double mean_particles_squared = n2_scaled[imu] / z_scaled[imu];
+      const double charge_correlation =
+          (mean_particles_squared - mean_particles * mean_particles) / sites;
+      densities[imu] = mean_particles / sites;
+      charge_correlations[imu] = std::max(0.0, charge_correlation);
+      compressibilities[imu] = params.beta * charge_correlations[imu];
       std::cout << "mu=" << std::setw(12) << mu_values[imu] << "  n=" << std::setw(12)
-                << densities[imu] << "\n";
+                << densities[imu] << "  kappa=" << std::setw(12)
+                << compressibilities[imu] << "\n";
     }
 
-    write_results(params.output, mu_values, densities, partitions);
+    write_results(
+        params.output,
+        mu_values,
+        densities,
+        charge_correlations,
+        compressibilities,
+        partitions);
     std::cout << "Wrote " << params.output << "\n";
     return 0;
   } catch (const std::exception& ex) {

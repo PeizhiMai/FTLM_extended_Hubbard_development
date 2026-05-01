@@ -5,7 +5,7 @@ This is a fresh C++ implementation of the FTLM thermodynamic core, built by lear
 - `reference_ftlm_hub_cond/fltm_hub_cond/hubTri2Dcond_omp.f`
 - `reference_ftlm_hub_cond/fltm_hub_cond/cond_spect_omp.f`
 
-The conductivity-specific parts from the Fortran code were intentionally dropped. The target here is the grand-canonical density curve `n` versus chemical potential `mu` at fixed inverse temperature `beta` for an extended Hubbard model on a periodic rectangular lattice.
+The conductivity-specific parts from the Fortran code were intentionally dropped. The target here is the grand-canonical density curve `n` versus chemical potential `mu`, plus the charge-fluctuation compressibility, at fixed inverse temperature `beta` for an extended Hubbard model on a periodic rectangular lattice.
 
 ## Model
 
@@ -34,6 +34,18 @@ cmake -S . -B build
 cmake --build build
 ```
 
+On Apple Silicon, a practical OpenMP path is Apple Clang plus a native `libomp` install. If `libomp` is installed under `/opt/homebrew/opt/libomp`, configure with:
+
+```bash
+cmake -S . -B build-clang-omp \
+  -DCMAKE_C_COMPILER=/usr/bin/clang \
+  -DCMAKE_CXX_COMPILER=/usr/bin/clang++ \
+  -DFTLM_LIBOMP_ROOT=/opt/homebrew/opt/libomp
+cmake --build build-clang-omp
+```
+
+If `FTLM_LIBOMP_ROOT` is not provided or no compatible OpenMP runtime is found, the FTLM executable still builds and runs in serial mode.
+
 ## Example
 
 ```bash
@@ -49,12 +61,46 @@ cmake --build build
   --output n_vs_mu.csv
 ```
 
+To reuse one FTLM/Lanczos pass for several inverse temperatures, pass a
+comma-separated beta list:
+
+```bash
+./build/ftlm_n_vs_mu \
+  --lx 4 --ly 4 \
+  --u 7.0 \
+  --beta-list 2.857142857142857,12.5 \
+  --samples 128 \
+  --lanczos-steps 80 \
+  --mu-min -3 --mu-max 4 --mu-count 281 \
+  --output n_vs_mu_multi_beta.csv
+```
+
+With `--beta-list`, the output CSV contains one row per `(beta, mu)` and adds a
+leading `beta` column. With a single `--beta`, the legacy output format is
+unchanged.
+
 The default Lanczos depth is `80` steps per random vector.
+The default FTLM sample count is `5`.
+By default, the FTLM executable diagonalizes small momentum blocks exactly when
+their dimension is at most `256`; change this with `--exact-block-threshold N`,
+or set it to `0` to force stochastic FTLM on every non-empty block.
+
+If OpenMP is available in the compiler toolchain, FTLM can parallelize over random samples:
+
+```bash
+./build/ftlm_n_vs_mu --threads 4 ...
+```
+
+Using more threads should reduce runtime with only a modest RSS increase because each thread only needs its own Lanczos work vectors for the active block.
 
 The output CSV contains:
 
 - `mu`
 - `n` as electrons per site
+- `charge_correlation` as the connected total charge fluctuation per site:
+  `(<N^2> - <N>^2) / N_sites`
+- `compressibility = beta * charge_correlation`, equivalent to `d n / d mu`
+  in the grand-canonical ensemble
 - `partition_like` as the shifted grand-canonical FTLM sum used internally
 
 ## Exact Diagonalization
@@ -143,9 +189,11 @@ Current features:
 - onsite interaction `U`
 - nearest-neighbor density interaction `V`
 - FTLM sampling
+- exact diagonalization fallback for small `(N_up,N_down,k)` blocks
 - translation-symmetry parent-state reduction
 - momentum-block (`k`) construction from translation orbits
 - direct CSV output for `n(mu)` at fixed `beta`
+- charge-fluctuation compressibility from the grand-canonical charge correlation
 
 ### Memory-optimization history
 
