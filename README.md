@@ -103,6 +103,26 @@ The output CSV contains:
   in the grand-canonical ensemble
 - `partition_like` as the shifted grand-canonical FTLM sum used internally
 
+For checkpointing long cluster runs, pass a checkpoint path:
+
+```bash
+./build/ftlm_n_vs_mu \
+  --lx 4 --ly 4 \
+  --u 7 \
+  --beta-list 2.857142857142857,12.5 \
+  --samples 128 \
+  --lanczos-steps 80 \
+  --checkpoint twist_000.ftlmcp \
+  --output twist_000.csv
+```
+
+The checkpoint stores compact per-block spectra after each completed
+`(N_up,N_down,k)` block. Rerunning the same command with the same checkpoint
+skips completed blocks and resumes from the next missing block. The companion
+`*.meta` file records the model, twist, sampling, seed, and exact-block
+threshold; a mismatched command fails early instead of mixing incompatible
+spectra.
+
 ## Exact Diagonalization
 
 A separate exact-diagonalization executable is also available:

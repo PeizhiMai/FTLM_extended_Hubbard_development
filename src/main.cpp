@@ -4,6 +4,7 @@
 #include <complex>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -50,6 +51,7 @@ struct Params {
   std::uint64_t seed = 12345;
   std::size_t max_sector_dim = 2000000;
   std::string output = "n_vs_mu.csv";
+  std::string checkpoint;
   std::string trace_partition_csv;
   std::string debug_block_csv;
   int debug_block_nup = -1;
@@ -142,6 +144,28 @@ struct StoredSpectrum {
   bool exact = false;
 };
 
+struct BlockKey {
+  int n_up = 0;
+  int n_down = 0;
+  int mx = 0;
+  int my = 0;
+
+  bool operator==(const BlockKey& other) const {
+    return n_up == other.n_up && n_down == other.n_down &&
+           mx == other.mx && my == other.my;
+  }
+};
+
+struct BlockKeyHash {
+  std::size_t operator()(const BlockKey& key) const {
+    std::size_t value = std::hash<int>{}(key.n_up);
+    value ^= std::hash<int>{}(key.n_down) + 0x9e3779b9U + (value << 6U) + (value >> 2U);
+    value ^= std::hash<int>{}(key.mx) + 0x9e3779b9U + (value << 6U) + (value >> 2U);
+    value ^= std::hash<int>{}(key.my) + 0x9e3779b9U + (value << 6U) + (value >> 2U);
+    return value;
+  }
+};
+
 struct Lattice {
   int lx = 0;
   int ly = 0;
@@ -217,6 +241,7 @@ void print_help(const char* argv0) {
       << "                        use exact diagonalization for k blocks with dimension <= N\n"
       << "  --seed N              random seed\n"
       << "  --max-sector-dim N    abort if a full sector exceeds this size\n"
+      << "  --checkpoint PATH     append/resume compact per-block spectra\n"
       << "  --trace-partition-csv PATH\n"
       << "                        write per-block FTLM vs ED thermodynamic traces\n"
       << "  --debug-block-nup N   selected block debug Nup\n"
@@ -283,6 +308,8 @@ Params parse_args(int argc, char** argv) {
       p.seed = parse_value<std::uint64_t>(next(arg));
     } else if (arg == "--max-sector-dim") {
       p.max_sector_dim = parse_value<std::size_t>(next(arg));
+    } else if (arg == "--checkpoint") {
+      p.checkpoint = next(arg);
     } else if (arg == "--trace-partition-csv") {
       p.trace_partition_csv = next(arg);
     } else if (arg == "--debug-block-nup") {
@@ -338,6 +365,50 @@ Params parse_args(int argc, char** argv) {
     die("Selected-block debug requires --debug-block-nup/--debug-block-ndown/--debug-block-mx/--debug-block-my together.");
   }
   return p;
+}
+
+std::string checkpoint_metadata_text(const Params& params) {
+  std::ostringstream out;
+  out << std::setprecision(17)
+      << "lx=" << params.lx << "\n"
+      << "ly=" << params.ly << "\n"
+      << "tx=" << params.tx << "\n"
+      << "ty=" << params.ty << "\n"
+      << "tp=" << params.tp << "\n"
+      << "phix=" << params.phix << "\n"
+      << "phiy=" << params.phiy << "\n"
+      << "u=" << params.u << "\n"
+      << "v=" << params.v << "\n"
+      << "samples=" << params.samples << "\n"
+      << "lanczos_steps=" << params.lanczos_steps << "\n"
+      << "exact_block_threshold=" << params.exact_block_threshold << "\n"
+      << "seed=" << params.seed << "\n";
+  return out.str();
+}
+
+void validate_or_write_checkpoint_metadata(const Params& params) {
+  if (params.checkpoint.empty()) {
+    return;
+  }
+  const std::string path = params.checkpoint + ".meta";
+  const std::string expected = checkpoint_metadata_text(params);
+  {
+    std::ifstream in(path);
+    if (in) {
+      const std::string existing(
+          (std::istreambuf_iterator<char>(in)),
+          std::istreambuf_iterator<char>());
+      if (existing != expected) {
+        die("Checkpoint metadata does not match current run: " + path);
+      }
+      return;
+    }
+  }
+  std::ofstream out(path);
+  if (!out) {
+    die("Failed to write checkpoint metadata: " + path);
+  }
+  out << expected;
 }
 
 int popcount64(std::uint64_t value) {
@@ -1195,6 +1266,137 @@ void write_selected_block_debug(
   }
 }
 
+template <typename T>
+void write_binary(std::ostream& out, const T& value) {
+  out.write(reinterpret_cast<const char*>(&value), sizeof(T));
+}
+
+template <typename T>
+bool read_binary(std::istream& in, T& value) {
+  return static_cast<bool>(in.read(reinterpret_cast<char*>(&value), sizeof(T)));
+}
+
+void ensure_checkpoint_header(const std::string& path) {
+  if (path.empty()) {
+    return;
+  }
+  {
+    std::ifstream in(path, std::ios::binary);
+    if (in && in.peek() != std::ifstream::traits_type::eof()) {
+      return;
+    }
+  }
+  std::ofstream out(path, std::ios::binary);
+  if (!out) {
+    die("Failed to create checkpoint file: " + path);
+  }
+  const char magic[8] = {'F', 'T', 'L', 'M', 'C', 'P', '1', '\n'};
+  out.write(magic, sizeof(magic));
+}
+
+std::unordered_map<BlockKey, StoredSpectrum, BlockKeyHash> read_checkpoint(
+    const std::string& path) {
+  std::unordered_map<BlockKey, StoredSpectrum, BlockKeyHash> spectra;
+  if (path.empty()) {
+    return spectra;
+  }
+  std::ifstream in(path, std::ios::binary);
+  if (!in) {
+    return spectra;
+  }
+
+  char magic[8] = {};
+  if (!in.read(magic, sizeof(magic))) {
+    return spectra;
+  }
+  const char expected_magic[8] = {'F', 'T', 'L', 'M', 'C', 'P', '1', '\n'};
+  if (std::memcmp(magic, expected_magic, sizeof(magic)) != 0) {
+    die("Checkpoint has an unrecognized format: " + path);
+  }
+
+  const char expected_record[8] = {'B', 'L', 'K', 'R', 'E', 'C', '1', '\n'};
+  while (true) {
+    char record_magic[8] = {};
+    if (!in.read(record_magic, sizeof(record_magic))) {
+      break;
+    }
+    if (std::memcmp(record_magic, expected_record, sizeof(record_magic)) != 0) {
+      break;
+    }
+
+    BlockKey key;
+    StoredSpectrum spectrum;
+    std::uint8_t exact_flag = 0;
+    std::uint64_t basis_dim = 0;
+    std::uint64_t eigen_count = 0;
+    std::uint64_t weight_count = 0;
+    if (!read_binary(in, key.n_up) ||
+        !read_binary(in, key.n_down) ||
+        !read_binary(in, key.mx) ||
+        !read_binary(in, key.my) ||
+        !read_binary(in, spectrum.particles) ||
+        !read_binary(in, basis_dim) ||
+        !read_binary(in, spectrum.trace_prefactor) ||
+        !read_binary(in, exact_flag) ||
+        !read_binary(in, eigen_count) ||
+        !read_binary(in, weight_count)) {
+      break;
+    }
+    if (eigen_count > 100000000ULL || weight_count > 100000000ULL) {
+      die("Checkpoint record is implausibly large: " + path);
+    }
+    spectrum.basis_dim = static_cast<std::size_t>(basis_dim);
+    spectrum.exact = exact_flag != 0;
+    spectrum.eigenvalues.resize(static_cast<std::size_t>(eigen_count));
+    spectrum.sample_weights.resize(static_cast<std::size_t>(weight_count));
+    if (!in.read(reinterpret_cast<char*>(spectrum.eigenvalues.data()),
+                 static_cast<std::streamsize>(sizeof(double) * spectrum.eigenvalues.size())) ||
+        !in.read(reinterpret_cast<char*>(spectrum.sample_weights.data()),
+                 static_cast<std::streamsize>(sizeof(double) * spectrum.sample_weights.size()))) {
+      break;
+    }
+    spectra[key] = std::move(spectrum);
+  }
+  return spectra;
+}
+
+void append_checkpoint_record(
+    const std::string& path,
+    const BlockKey& key,
+    const StoredSpectrum& spectrum) {
+  if (path.empty()) {
+    return;
+  }
+  ensure_checkpoint_header(path);
+  std::ofstream out(path, std::ios::binary | std::ios::app);
+  if (!out) {
+    die("Failed to append checkpoint file: " + path);
+  }
+  const char record_magic[8] = {'B', 'L', 'K', 'R', 'E', 'C', '1', '\n'};
+  out.write(record_magic, sizeof(record_magic));
+  write_binary(out, key.n_up);
+  write_binary(out, key.n_down);
+  write_binary(out, key.mx);
+  write_binary(out, key.my);
+  write_binary(out, spectrum.particles);
+  const std::uint64_t basis_dim = static_cast<std::uint64_t>(spectrum.basis_dim);
+  write_binary(out, basis_dim);
+  write_binary(out, spectrum.trace_prefactor);
+  const std::uint8_t exact_flag = spectrum.exact ? 1 : 0;
+  write_binary(out, exact_flag);
+  const std::uint64_t eigen_count =
+      static_cast<std::uint64_t>(spectrum.eigenvalues.size());
+  const std::uint64_t weight_count =
+      static_cast<std::uint64_t>(spectrum.sample_weights.size());
+  write_binary(out, eigen_count);
+  write_binary(out, weight_count);
+  out.write(reinterpret_cast<const char*>(spectrum.eigenvalues.data()),
+            static_cast<std::streamsize>(sizeof(double) * spectrum.eigenvalues.size()));
+  out.write(reinterpret_cast<const char*>(spectrum.sample_weights.data()),
+            static_cast<std::streamsize>(sizeof(double) * spectrum.sample_weights.size()));
+  out.flush();
+}
+
 std::vector<double> linspace(double start, double stop, int count) {
   std::vector<double> values(static_cast<std::size_t>(count));
   const double step = (stop - start) / static_cast<double>(count - 1);
@@ -1262,6 +1464,12 @@ int main(int argc, char** argv) {
     const bool debug_selected_block =
         params.debug_block_nup >= 0 && params.debug_block_ndown >= 0 &&
         params.debug_block_mx >= 0 && params.debug_block_my >= 0;
+    if (!params.checkpoint.empty() && (trace_blocks || debug_selected_block)) {
+      die("--checkpoint is not currently compatible with trace/debug block output.");
+    }
+    validate_or_write_checkpoint_metadata(params);
+    ensure_checkpoint_header(params.checkpoint);
+    auto checkpoint_spectra = read_checkpoint(params.checkpoint);
 
     std::cout << "Reference used: "
               << "reference_ftlm_hub_cond/fltm_hub_cond/hubTri2Dcond_omp.f"
@@ -1281,6 +1489,10 @@ int main(int argc, char** argv) {
               << " phix=" << params.phix << " phiy=" << params.phiy
               << " threads=" << requested_omp_threads(params)
               << " exact_block_threshold=" << params.exact_block_threshold << "\n";
+    if (!params.checkpoint.empty()) {
+      std::cout << "checkpoint=" << params.checkpoint
+                << " loaded_blocks=" << checkpoint_spectra.size() << "\n";
+    }
     std::vector<StoredSpectrum> stored_spectra;
     std::vector<double> single_emin_by_mu(
         mu_values.size(), std::numeric_limits<double>::infinity());
@@ -1320,6 +1532,34 @@ int main(int argc, char** argv) {
             const MomentumBlock block = build_momentum_block(sector, lattice, mx, my);
             active_sum += block.basis_dim;
             if (block.basis_dim == 0) {
+              continue;
+            }
+
+            const BlockKey block_key{n_up, n_down, mx, my};
+            const auto checkpoint_it = checkpoint_spectra.find(block_key);
+            if (checkpoint_it != checkpoint_spectra.end()) {
+              const StoredSpectrum& stored = checkpoint_it->second;
+              if (stored.basis_dim != block.basis_dim ||
+                  stored.particles != block.particles) {
+                die("Checkpoint block metadata does not match current run.");
+              }
+              if (multi_beta) {
+                stored_spectra.push_back(stored);
+              } else {
+                const std::vector<double>* sample_weights =
+                    stored.sample_weights.empty() ? nullptr : &stored.sample_weights;
+                accumulate_block_thermo(
+                    stored.eigenvalues,
+                    sample_weights,
+                    stored.trace_prefactor,
+                    stored.particles,
+                    params.beta,
+                    mu_values,
+                    single_emin_by_mu,
+                    single_z_scaled,
+                    single_n_scaled,
+                    single_n2_scaled);
+              }
               continue;
             }
 
@@ -1419,7 +1659,7 @@ int main(int argc, char** argv) {
               }
             }
 
-            if (multi_beta) {
+            if (multi_beta || !params.checkpoint.empty()) {
               StoredSpectrum stored;
               stored.particles = block.particles;
               stored.basis_dim = block.basis_dim;
@@ -1432,7 +1672,24 @@ int main(int argc, char** argv) {
                 stored.sample_weights = std::move(spectrum.sample_weights);
                 stored.trace_prefactor = static_cast<double>(stored.basis_dim);
               }
-              stored_spectra.push_back(std::move(stored));
+              append_checkpoint_record(params.checkpoint, block_key, stored);
+              if (multi_beta) {
+                stored_spectra.push_back(std::move(stored));
+              } else {
+                const std::vector<double>* sample_weights =
+                    stored.sample_weights.empty() ? nullptr : &stored.sample_weights;
+                accumulate_block_thermo(
+                    stored.eigenvalues,
+                    sample_weights,
+                    stored.trace_prefactor,
+                    stored.particles,
+                    params.beta,
+                    mu_values,
+                    single_emin_by_mu,
+                    single_z_scaled,
+                    single_n_scaled,
+                    single_n2_scaled);
+              }
             } else if (use_exact_block) {
               accumulate_block_thermo(
                   exact_eigenvalues,
