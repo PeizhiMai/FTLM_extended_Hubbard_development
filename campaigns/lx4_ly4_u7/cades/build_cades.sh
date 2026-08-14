@@ -36,6 +36,7 @@ cmake --build "$BUILD_ROOT" --parallel 8
 ctest --test-dir "$BUILD_ROOT" --output-on-failure
 
 mkdir -p "$BIN_DIR"
+cp -p "$SOURCE_DIR/GIT_COMMIT" "$BIN_DIR/GIT_COMMIT"
 for executable in \
   ftlm_n_vs_mu \
   ftlm_reduce_checkpoint \

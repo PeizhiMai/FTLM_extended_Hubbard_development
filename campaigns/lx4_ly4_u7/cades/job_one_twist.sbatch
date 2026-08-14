@@ -32,6 +32,21 @@ PROGRESS_STATE="$RUN_DIR/progress_state.json"
 TARGET_TAG=$(printf '%03d' "$TARGET_R")
 OUTPUT="$RUN_DIR/twist_${TWIST_ID}_thermo_R${TARGET_TAG}.csv"
 
+# Resolve the deployment symlinks once.  A later deployment may update
+# CAMPAIGN_ROOT/bin while this job is running; the active FTLM and reducer must
+# nevertheless come from one immutable build.
+FTLM_EXEC=$(readlink -f "$BIN_DIR/ftlm_n_vs_mu")
+REDUCER_EXEC=$(readlink -f "$BIN_DIR/ftlm_reduce_checkpoint")
+IMMUTABLE_BIN_DIR=$(dirname "$FTLM_EXEC")
+if [[ $(dirname "$REDUCER_EXEC") != "$IMMUTABLE_BIN_DIR" ]]; then
+  echo "FTLM and reducer resolved to different deployments" >&2
+  exit 2
+fi
+DEPLOYED_COMMIT=$(cat "$IMMUTABLE_BIN_DIR/GIT_COMMIT")
+SOURCE_DIR="$CAMPAIGN_ROOT/sources/$DEPLOYED_COMMIT"
+FTLM_SHA256=$(sha256sum "$FTLM_EXEC" | awk '{print $1}')
+REDUCER_SHA256=$(sha256sum "$REDUCER_EXEC" | awk '{print $1}')
+
 module purge
 module load intel/2024.1.0 mkl/2024.1.0
 export OMP_NUM_THREADS="$THREADS"
@@ -47,7 +62,7 @@ cd "$RUN_DIR"
 ulimit -c 0
 
 COMMAND=(
-  "$BIN_DIR/ftlm_n_vs_mu"
+  "$FTLM_EXEC"
   --lx 4 --ly 4
   --tx 1 --ty 1 --tp 0
   --u 7 --v 0
@@ -75,7 +90,20 @@ fi
 
 printf '%q ' "${COMMAND[@]}" > "command_R${TARGET_TAG}.txt"
 printf '\n' >> "command_R${TARGET_TAG}.txt"
-echo "FTLM_JOB_START utc=$(date -u +%Y-%m-%dT%H:%M:%SZ) host=$(hostname) job=${SLURM_JOB_ID:-} threads=$THREADS target_R=$TARGET_R"
+cat > "provenance_job-${SLURM_JOB_ID:-unknown}_R${TARGET_TAG}.txt" <<EOF
+git_commit=$DEPLOYED_COMMIT
+source_dir=$SOURCE_DIR
+ftlm_executable=$FTLM_EXEC
+ftlm_sha256=$FTLM_SHA256
+reducer_executable=$REDUCER_EXEC
+reducer_sha256=$REDUCER_SHA256
+slurm_job_id=${SLURM_JOB_ID:-}
+node=$(hostname)
+threads=$THREADS
+target_R=$TARGET_R
+started_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
+echo "FTLM_JOB_START utc=$(date -u +%Y-%m-%dT%H:%M:%SZ) host=$(hostname) job=${SLURM_JOB_ID:-} threads=$THREADS target_R=$TARGET_R git_commit=$DEPLOYED_COMMIT ftlm_sha256=$FTLM_SHA256"
 
 child_pid=''
 request_stop() {
@@ -110,7 +138,7 @@ echo "FTLM_JOB_END utc=$(date -u +%Y-%m-%dT%H:%M:%SZ) rc=$rc"
 status_rc=1
 if [[ -s $CHECKPOINT && -s $CHECKPOINT.meta ]]; then
   set +e
-  "$BIN_DIR/ftlm_reduce_checkpoint" \
+  "$REDUCER_EXEC" \
     --checkpoint "$CHECKPOINT" --samples "$TARGET_R" \
     --status-json "status_R${TARGET_TAG}.json" \
     | tee "status_R${TARGET_TAG}.txt"
@@ -144,7 +172,7 @@ if [[ -z ${ONLY_BLOCK_NUP:-} ]]; then
       continue
     fi
     reduce_tag=$(printf '%03d' "$reduce_r")
-    "$BIN_DIR/ftlm_reduce_checkpoint" \
+    "$REDUCER_EXEC" \
       --checkpoint "$CHECKPOINT" --samples "$reduce_r" \
       --beta-list 2.857142857142857,12.5 \
       --mu-min -3 --mu-max 4 --mu-count 281 \
