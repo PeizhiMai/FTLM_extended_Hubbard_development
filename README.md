@@ -325,7 +325,12 @@ The pointwise comparison file contains:
 
 ## Important current limitation
 
-This version is intentionally clean and memory-aware, but it does not yet reproduce the translational symmetry reduction used in the Fortran parent-state code. That means the Hilbert-space vectors still scale with the full fixed-`(N_up,N_down)` sector size. A guard is included through `--max-sector-dim` so large sectors fail early instead of exhausting memory.
+Lanczos vectors are reduced into `(N_up,N_down,k_x,k_y)` momentum blocks, but
+sector construction still enumerates the full fixed-`(N_up,N_down)` state
+space once to form translation orbits and compact hopping relations. For the
+4x4 half-filled sector this means scanning `165,636,900` product states even
+though the largest momentum block has dimension `10,353,252`. The
+`--max-sector-dim` guard therefore remains important.
 
 ## Thread Handoff Notes
 
@@ -436,9 +441,17 @@ Result:
 
 That change was reverted.
 
-### Current best C++ memory result
+#### Stage 6
 
-The current code in `src/main.cpp` is the reverted-to-good state after the successful memory reductions.
+For the 4x4 campaign, the node-based state-relation hash was replaced by a
+dense combination-rank lookup tailored to the small spin-bitmask address
+space. Orbit relations are now stored in one flat Cartesian-rank array and
+packed into at most eight bytes each. The 4x4 half-filled relation table is
+therefore about `1.23 GiB`, with no per-state hash-node allocation. Checkpoints
+and thermodynamic CSVs were verified byte-for-byte against the previous hash
+implementation on 2x2, 3x3, and a selected 3x4 block.
+
+### Small-cluster C++ memory history
 
 Best measured C++ number on the `4x2` cluster:
 
@@ -472,7 +485,7 @@ Measured reference result for the `8`-site run:
   - `7,467,008` bytes
   - about `7.12 MiB`
 
-So the current C++ code is still above the reference by about:
+At that historical stage the C++ code was above the reference by about:
 
 - `3.25 MiB` on the tested `8`-site case
 
@@ -492,11 +505,11 @@ Representative files:
 
 ### Important caveats for a future thread
 
-- The current code is still more memory-heavy than the Fortran reference.
-- The largest remaining overhead is likely in sector construction:
-  - `unordered_map<StateKey, Relation, ...>`
-  - temporary orbit bookkeeping
-  - repeated translation work
+- Small-cluster RSS comparisons predate the Stage 6 flat-relation change and
+  should not be extrapolated to 4x4.
+- The largest remaining costs are full-sector enumeration, repeated
+  translations, the compact hopping table, and the momentum-block Lanczos
+  vectors.
 - The `3x3` run showed mild unphysical tail behavior at large `mu`, so numerical quality should still be treated as under active development.
 - The Fortran reference computes much more than `n(mu)`:
   - optical conductivity workflow
@@ -508,9 +521,9 @@ Representative files:
 
 If a new thread continues optimization, the highest-value next steps are:
 
-- remove or shrink the `unordered_map` orbit lookup without reintroducing the failed flat-array overhead
-- reduce temporary allocation during sector construction
+- avoid rescanning the full product sector where direct orbit generation is possible
+- reduce the compact hopping-table footprint or generate rows on demand
 - reuse translation buffers and scratch vectors
-- consider direct combinatorial ranking/unranking for state lookup
+- benchmark direct combinatorial ranking against the current dense spin-rank table
 - validate `n(mu)` more carefully against exact diagonalization on very small clusters
 - check whether the FTLM weighting can be made closer to the Fortran normalization conventions in the large-`mu` tails
