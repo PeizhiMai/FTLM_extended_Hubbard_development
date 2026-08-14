@@ -5,7 +5,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=220G
+#SBATCH --mem=250G
 #SBATCH --exclusive
 #SBATCH --time=04:00:00
 #SBATCH --signal=B:USR1@600
@@ -24,13 +24,33 @@ set -u
 
 THREADS=${FTLM_THREADS:-16}
 MAX_RUNTIME_MINUTES=${MAX_RUNTIME_MINUTES:-210}
+LANCZOS_MAX_STEPS=${LANCZOS_MAX_STEPS:-80}
+LANCZOS_SAVE_STEPS=${LANCZOS_SAVE_STEPS:-}
+# Slurm --export uses commas as separators, so submit_wave transports the list
+# with ':' and the wrapper restores the CLI representation.
+LANCZOS_SAVE_STEPS=${LANCZOS_SAVE_STEPS//:/,}
+CHECKPOINT_SERIES=${CHECKPOINT_SERIES:-legacy}
 BIN_DIR=${BIN_DIR:-"$CAMPAIGN_ROOT/bin"}
 RUN_DIR="$CAMPAIGN_ROOT/runs/twist_$TWIST_ID"
-CHECKPOINT="$RUN_DIR/twist_${TWIST_ID}.ftlmcp"
-PROGRESS_JSONL="$RUN_DIR/progress.jsonl"
-PROGRESS_STATE="$RUN_DIR/progress_state.json"
 TARGET_TAG=$(printf '%03d' "$TARGET_R")
-OUTPUT="$RUN_DIR/twist_${TWIST_ID}_thermo_R${TARGET_TAG}.csv"
+M_TAG=$(printf '%03d' "$LANCZOS_MAX_STEPS")
+if [[ $CHECKPOINT_SERIES == legacy ]]; then
+  CHECKPOINT="$RUN_DIR/twist_${TWIST_ID}.ftlmcp"
+  PROGRESS_JSONL="$RUN_DIR/progress.jsonl"
+  PROGRESS_STATE="$RUN_DIR/progress_state.json"
+  OUTPUT="$RUN_DIR/twist_${TWIST_ID}_thermo_R${TARGET_TAG}.csv"
+  FILE_TAG="R${TARGET_TAG}"
+else
+  if [[ ! $CHECKPOINT_SERIES =~ ^[A-Za-z0-9_-]+$ ]]; then
+    echo "invalid CHECKPOINT_SERIES=$CHECKPOINT_SERIES" >&2
+    exit 2
+  fi
+  CHECKPOINT="$RUN_DIR/twist_${TWIST_ID}_${CHECKPOINT_SERIES}.ftlmcp"
+  PROGRESS_JSONL="$RUN_DIR/progress_${CHECKPOINT_SERIES}.jsonl"
+  PROGRESS_STATE="$RUN_DIR/progress_state_${CHECKPOINT_SERIES}.json"
+  OUTPUT="$RUN_DIR/twist_${TWIST_ID}_thermo_m${M_TAG}_R${TARGET_TAG}.csv"
+  FILE_TAG="${CHECKPOINT_SERIES}_m${M_TAG}_R${TARGET_TAG}"
+fi
 
 # Resolve the deployment symlinks once.  A later deployment may update
 # CAMPAIGN_ROOT/bin while this job is running; the active FTLM and reducer must
@@ -70,7 +90,7 @@ COMMAND=(
   --beta-list 2.857142857142857,12.5
   --mu-min -3 --mu-max 4 --mu-count 281
   --samples "$TARGET_R"
-  --lanczos-steps 80
+  --lanczos-steps "$LANCZOS_MAX_STEPS"
   --exact-block-threshold 256
   --threads "$THREADS"
   --seed "$SEED"
@@ -83,14 +103,17 @@ COMMAND=(
   --twist-id "$TWIST_ID"
   --output "$OUTPUT"
 )
+if [[ -n $LANCZOS_SAVE_STEPS ]]; then
+  COMMAND+=(--lanczos-save-steps "$LANCZOS_SAVE_STEPS")
+fi
 if [[ -n ${ONLY_BLOCK_NUP:-} ]]; then
   ONLY_BLOCK="${ONLY_BLOCK_NUP},${ONLY_BLOCK_NDOWN:?},${ONLY_BLOCK_MX:?},${ONLY_BLOCK_MY:?}"
   COMMAND+=(--only-block "$ONLY_BLOCK")
 fi
 
-printf '%q ' "${COMMAND[@]}" > "command_R${TARGET_TAG}.txt"
-printf '\n' >> "command_R${TARGET_TAG}.txt"
-cat > "provenance_job-${SLURM_JOB_ID:-unknown}_R${TARGET_TAG}.txt" <<EOF
+printf '%q ' "${COMMAND[@]}" > "command_${FILE_TAG}.txt"
+printf '\n' >> "command_${FILE_TAG}.txt"
+cat > "provenance_job-${SLURM_JOB_ID:-unknown}_${FILE_TAG}.txt" <<EOF
 git_commit=$DEPLOYED_COMMIT
 source_dir=$SOURCE_DIR
 ftlm_executable=$FTLM_EXEC
@@ -101,9 +124,13 @@ slurm_job_id=${SLURM_JOB_ID:-}
 node=$(hostname)
 threads=$THREADS
 target_R=$TARGET_R
+target_m=$LANCZOS_MAX_STEPS
+lanczos_save_steps=$LANCZOS_SAVE_STEPS
+checkpoint_series=$CHECKPOINT_SERIES
+requested_memory_gb=250
 started_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
-echo "FTLM_JOB_START utc=$(date -u +%Y-%m-%dT%H:%M:%SZ) host=$(hostname) job=${SLURM_JOB_ID:-} threads=$THREADS target_R=$TARGET_R git_commit=$DEPLOYED_COMMIT ftlm_sha256=$FTLM_SHA256"
+echo "FTLM_JOB_START utc=$(date -u +%Y-%m-%dT%H:%M:%SZ) host=$(hostname) job=${SLURM_JOB_ID:-} threads=$THREADS memory_gb=250 target_R=$TARGET_R target_m=$LANCZOS_MAX_STEPS save_m=$LANCZOS_SAVE_STEPS series=$CHECKPOINT_SERIES git_commit=$DEPLOYED_COMMIT ftlm_sha256=$FTLM_SHA256"
 
 child_pid=''
 request_stop() {
@@ -140,8 +167,9 @@ if [[ -s $CHECKPOINT && -s $CHECKPOINT.meta ]]; then
   set +e
   "$REDUCER_EXEC" \
     --checkpoint "$CHECKPOINT" --samples "$TARGET_R" \
-    --status-json "status_R${TARGET_TAG}.json" \
-    | tee "status_R${TARGET_TAG}.txt"
+    --lanczos-steps "$LANCZOS_MAX_STEPS" \
+    --status-json "status_${FILE_TAG}.json" \
+    | tee "status_${FILE_TAG}.txt"
   status_rc=${PIPESTATUS[0]}
   set -e
 else
@@ -153,8 +181,8 @@ if [[ $rc -eq 75 ]]; then
     echo "FTLM_WRAPPER event=FAILED reason=incomplete_checkpoint_unreadable" >&2
     exit 1
   fi
-  echo "FTLM_WRAPPER event=CHECKPOINTED_INCOMPLETE target_R=$TARGET_R"
-  sha256sum "$CHECKPOINT" "$CHECKPOINT.meta" > "SHA256_R${TARGET_TAG}.txt"
+  echo "FTLM_WRAPPER event=CHECKPOINTED_INCOMPLETE target_R=$TARGET_R target_m=$LANCZOS_MAX_STEPS series=$CHECKPOINT_SERIES"
+  sha256sum "$CHECKPOINT" "$CHECKPOINT.meta" > "SHA256_${FILE_TAG}.txt"
   exit 0
 fi
 if [[ $rc -ne 0 ]]; then
@@ -167,18 +195,37 @@ if [[ $status_rc -ne 0 ]]; then
 fi
 
 if [[ -z ${ONLY_BLOCK_NUP:-} ]]; then
+  REDUCE_R_VALUES=()
   for reduce_r in 8 16 32 64 128 256; do
     if (( reduce_r > TARGET_R )); then
       continue
     fi
-    reduce_tag=$(printf '%03d' "$reduce_r")
+    REDUCE_R_VALUES+=("$reduce_r")
+  done
+  if [[ ! " ${REDUCE_R_VALUES[*]} " =~ " ${TARGET_R} " ]]; then
+    REDUCE_R_VALUES+=("$TARGET_R")
+  fi
+  if [[ $CHECKPOINT_SERIES == legacy ]]; then
+    for reduce_r in "${REDUCE_R_VALUES[@]}"; do
+      reduce_tag=$(printf '%03d' "$reduce_r")
+      "$REDUCER_EXEC" \
+        --checkpoint "$CHECKPOINT" --samples "$reduce_r" \
+        --lanczos-steps "$LANCZOS_MAX_STEPS" \
+        --beta-list 2.857142857142857,12.5 \
+        --mu-min -3 --mu-max 4 --mu-count 281 \
+        --output "$RUN_DIR/twist_${TWIST_ID}_thermo_R${reduce_tag}.csv"
+    done
+  else
+    REDUCE_R_CSV=$(IFS=,; echo "${REDUCE_R_VALUES[*]}")
     "$REDUCER_EXEC" \
-      --checkpoint "$CHECKPOINT" --samples "$reduce_r" \
+      --checkpoint "$CHECKPOINT" \
+      --samples-list "$REDUCE_R_CSV" \
+      --lanczos-steps-list "$LANCZOS_SAVE_STEPS" \
       --beta-list 2.857142857142857,12.5 \
       --mu-min -3 --mu-max 4 --mu-count 281 \
-      --output "$RUN_DIR/twist_${TWIST_ID}_thermo_R${reduce_tag}.csv"
-  done
+      --output-template "$RUN_DIR/twist_${TWIST_ID}_thermo_m{m}_R{R}.csv"
+  fi
 fi
 sha256sum "$CHECKPOINT" "$CHECKPOINT.meta" "$RUN_DIR"/*.csv 2>/dev/null \
-  > "SHA256_R${TARGET_TAG}.txt" || true
-echo "FTLM_WRAPPER event=COMPLETE target_R=$TARGET_R"
+  > "SHA256_${FILE_TAG}.txt" || true
+echo "FTLM_WRAPPER event=COMPLETE target_R=$TARGET_R target_m=$LANCZOS_MAX_STEPS series=$CHECKPOINT_SERIES"

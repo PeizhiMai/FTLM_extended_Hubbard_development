@@ -23,8 +23,10 @@ namespace {
 
 constexpr std::array<char, 8> kV1Magic = {'F', 'T', 'L', 'M', 'C', 'P', '1', '\n'};
 constexpr std::array<char, 8> kV2Magic = {'F', 'T', 'L', 'M', 'C', 'P', '2', '\n'};
+constexpr std::array<char, 8> kV3Magic = {'F', 'T', 'L', 'M', 'C', 'P', '3', '\n'};
 constexpr std::array<char, 8> kV1Record = {'B', 'L', 'K', 'R', 'E', 'C', '1', '\n'};
 constexpr std::array<char, 8> kV2Record = {'F', '2', 'R', 'E', 'C', '1', '\n', '\0'};
+constexpr std::array<char, 8> kV3Record = {'F', '3', 'R', 'E', 'C', '1', '\n', '\0'};
 
 enum class RecordKind : std::uint32_t {
   kSample = 1,
@@ -119,23 +121,36 @@ void write_all(int fd, const void* data, std::size_t size, const std::string& pa
   }
 }
 
-void append_record(
+void write_record_frame(
+    int fd,
     const std::string& path,
+    Format format,
     RecordKind kind,
     const std::vector<std::uint8_t>& payload) {
+  const std::uint32_t kind_value = static_cast<std::uint32_t>(kind);
+  const std::uint64_t payload_size = static_cast<std::uint64_t>(payload.size());
+  const std::uint64_t checksum = fnv1a64(payload);
+  const auto& record_magic = format == Format::kV3 ? kV3Record : kV2Record;
+  write_all(fd, record_magic.data(), record_magic.size(), path);
+  write_all(fd, &kind_value, sizeof(kind_value), path);
+  write_all(fd, &payload_size, sizeof(payload_size), path);
+  write_all(fd, &checksum, sizeof(checksum), path);
+  if (!payload.empty()) write_all(fd, payload.data(), payload.size(), path);
+}
+
+void append_records(
+    const std::string& path,
+    Format format,
+    const std::vector<std::pair<RecordKind, std::vector<std::uint8_t>>>& records) {
+  if (records.empty()) return;
   const int fd = ::open(path.c_str(), O_WRONLY | O_APPEND);
   if (fd < 0) {
     fail("Failed to append checkpoint " + path + ": " + std::strerror(errno));
   }
   try {
-    const std::uint32_t kind_value = static_cast<std::uint32_t>(kind);
-    const std::uint64_t payload_size = static_cast<std::uint64_t>(payload.size());
-    const std::uint64_t checksum = fnv1a64(payload);
-    write_all(fd, kV2Record.data(), kV2Record.size(), path);
-    write_all(fd, &kind_value, sizeof(kind_value), path);
-    write_all(fd, &payload_size, sizeof(payload_size), path);
-    write_all(fd, &checksum, sizeof(checksum), path);
-    if (!payload.empty()) write_all(fd, payload.data(), payload.size(), path);
+    for (const auto& record : records) {
+      write_record_frame(fd, path, format, record.first, record.second);
+    }
     if (::fsync(fd) != 0) {
       fail("Failed to fsync checkpoint " + path + ": " + std::strerror(errno));
     }
@@ -146,6 +161,14 @@ void append_record(
   if (::close(fd) != 0) {
     fail("Failed to close checkpoint " + path + ": " + std::strerror(errno));
   }
+}
+
+void append_record(
+    const std::string& path,
+    Format format,
+    RecordKind kind,
+    const std::vector<std::uint8_t>& payload) {
+  append_records(path, format, {{kind, payload}});
 }
 
 template <typename T>
@@ -250,6 +273,7 @@ Format detect_format(const std::string& path) {
   }
   if (magic == kV1Magic) return Format::kV1;
   if (magic == kV2Magic) return Format::kV2;
+  if (magic == kV3Magic) return Format::kV3;
   return Format::kUnknown;
 }
 
@@ -292,7 +316,28 @@ void initialize_v2_checkpoint(const std::string& path) {
   ::close(fd);
 }
 
-CheckpointData read_checkpoint(const std::string& path, bool load_spectra) {
+void initialize_v3_checkpoint(const std::string& path) {
+  const Format format = detect_format(path);
+  if (format == Format::kV3) return;
+  if (format != Format::kMissing && format != Format::kEmpty) {
+    fail("Cannot initialize v3 checkpoint over an existing non-v3 file: " + path);
+  }
+  const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0664);
+  if (fd < 0) fail("Failed to initialize checkpoint " + path + ": " + std::strerror(errno));
+  try {
+    write_all(fd, kV3Magic.data(), kV3Magic.size(), path);
+    if (::fsync(fd) != 0) fail("Failed to fsync new checkpoint: " + path);
+  } catch (...) {
+    ::close(fd);
+    throw;
+  }
+  ::close(fd);
+}
+
+CheckpointData read_checkpoint(
+    const std::string& path,
+    bool load_spectra,
+    int spectrum_lanczos_steps) {
   CheckpointData data;
   data.format = detect_format(path);
   if (data.format == Format::kMissing || data.format == Format::kEmpty) return data;
@@ -345,8 +390,10 @@ CheckpointData read_checkpoint(const std::string& path, bool load_spectra) {
       if (in.gcount() != 0 || !in.eof()) data.trailing_partial_record = true;
       break;
     }
-    if (record_magic != kV2Record) {
-      fail("Corrupted v2 checkpoint record magic at byte " +
+    const auto& expected_record_magic =
+        data.format == Format::kV3 ? kV3Record : kV2Record;
+    if (record_magic != expected_record_magic) {
+      fail("Corrupted checkpoint record magic at byte " +
            std::to_string(static_cast<long long>(record_start)) + ": " + path);
     }
     std::uint32_t kind_value = 0;
@@ -357,7 +404,7 @@ CheckpointData read_checkpoint(const std::string& path, bool load_spectra) {
       data.trailing_partial_record = true;
       break;
     }
-    if (payload_size > (1ULL << 32U)) fail("Implausibly large v2 checkpoint payload.");
+    if (payload_size > (1ULL << 32U)) fail("Implausibly large checkpoint payload.");
     std::vector<std::uint8_t> payload(static_cast<std::size_t>(payload_size));
     if (!payload.empty() &&
         !in.read(reinterpret_cast<char*>(payload.data()),
@@ -367,7 +414,7 @@ CheckpointData read_checkpoint(const std::string& path, bool load_spectra) {
     }
     const std::uint64_t checksum = fnv1a64(payload);
     if (checksum != expected_checksum) {
-      fail("Checksum mismatch in complete v2 checkpoint record: " + path);
+      fail("Checksum mismatch in complete checkpoint record: " + path);
     }
 
     std::size_t cursor = 0;
@@ -378,23 +425,45 @@ CheckpointData read_checkpoint(const std::string& path, bool load_spectra) {
       record.particles = read_pod<std::int32_t>(payload, cursor);
       record.basis_dim = read_pod<std::uint64_t>(payload, cursor);
       record.sample_id = read_pod<std::int32_t>(payload, cursor);
+      if (data.format == Format::kV3) {
+        record.lanczos_steps = read_pod<std::int32_t>(payload, cursor);
+      }
       record.eigenvalues = read_double_vector(payload, cursor);
       record.overlaps = read_double_vector(payload, cursor);
       record.checksum = checksum;
-      if (record.sample_id < 0 || record.eigenvalues.size() != record.overlaps.size()) {
-        fail("Invalid v2 sample record.");
+      if (record.sample_id < 0 ||
+          (data.format == Format::kV3 && record.lanczos_steps <= 0) ||
+          record.eigenvalues.size() != record.overlaps.size()) {
+        fail("Invalid checkpoint sample record.");
       }
-      auto& by_id = data.samples[record.key];
-      const auto existing = by_id.find(record.sample_id);
-      if (existing != by_id.end() && existing->second.checksum != checksum) {
-        fail("Conflicting duplicate sample record for " + block_key_text(record.key) +
-             " sample=" + std::to_string(record.sample_id));
+      if (data.format == Format::kV3) {
+        auto& by_depth = data.depth_samples[record.key][record.sample_id];
+        const auto existing = by_depth.find(record.lanczos_steps);
+        if (existing != by_depth.end() && existing->second.checksum != checksum) {
+          fail("Conflicting duplicate sample record for " + block_key_text(record.key) +
+               " sample=" + std::to_string(record.sample_id) +
+               " m=" + std::to_string(record.lanczos_steps));
+        }
+        if (!load_spectra ||
+            (spectrum_lanczos_steps > 0 &&
+             record.lanczos_steps != spectrum_lanczos_steps)) {
+          record.eigenvalues.clear();
+          record.overlaps.clear();
+        }
+        by_depth[record.lanczos_steps] = std::move(record);
+      } else {
+        auto& by_id = data.samples[record.key];
+        const auto existing = by_id.find(record.sample_id);
+        if (existing != by_id.end() && existing->second.checksum != checksum) {
+          fail("Conflicting duplicate sample record for " + block_key_text(record.key) +
+               " sample=" + std::to_string(record.sample_id));
+        }
+        if (!load_spectra) {
+          record.eigenvalues.clear();
+          record.overlaps.clear();
+        }
+        by_id[record.sample_id] = std::move(record);
       }
-      if (!load_spectra) {
-        record.eigenvalues.clear();
-        record.overlaps.clear();
-      }
-      by_id[record.sample_id] = std::move(record);
     } else if (kind == RecordKind::kExact) {
       ExactRecord record;
       record.key = read_key(payload, cursor);
@@ -410,23 +479,44 @@ CheckpointData read_checkpoint(const std::string& path, bool load_spectra) {
       data.exact_blocks[record.key] = std::move(record);
     } else if (kind == RecordKind::kBlockComplete) {
       const BlockKey key = read_key(payload, cursor);
+      const int lanczos_steps = data.format == Format::kV3
+          ? read_pod<std::int32_t>(payload, cursor) : 0;
       const int samples = read_pod<std::int32_t>(payload, cursor);
-      data.block_complete_samples[key] =
-          std::max(data.block_complete_samples[key], samples);
+      if (data.format == Format::kV3) {
+        auto& achieved = data.block_complete_depth_samples[key][lanczos_steps];
+        achieved = std::max(achieved, samples);
+      } else {
+        data.block_complete_samples[key] =
+            std::max(data.block_complete_samples[key], samples);
+      }
     } else if (kind == RecordKind::kSectorComplete) {
       SectorKey key;
       key.n_up = read_pod<std::int32_t>(payload, cursor);
       key.n_down = read_pod<std::int32_t>(payload, cursor);
+      const int lanczos_steps = data.format == Format::kV3
+          ? read_pod<std::int32_t>(payload, cursor) : 0;
       const int samples = read_pod<std::int32_t>(payload, cursor);
-      data.sector_complete_samples[key] =
-          std::max(data.sector_complete_samples[key], samples);
+      if (data.format == Format::kV3) {
+        auto& achieved = data.sector_complete_depth_samples[key][lanczos_steps];
+        achieved = std::max(achieved, samples);
+      } else {
+        data.sector_complete_samples[key] =
+            std::max(data.sector_complete_samples[key], samples);
+      }
     } else if (kind == RecordKind::kRunComplete) {
-      data.run_complete_samples =
-          std::max(data.run_complete_samples, read_pod<std::int32_t>(payload, cursor));
+      if (data.format == Format::kV3) {
+        const int lanczos_steps = read_pod<std::int32_t>(payload, cursor);
+        const int samples = read_pod<std::int32_t>(payload, cursor);
+        data.run_complete_depth_samples[lanczos_steps] =
+            std::max(data.run_complete_depth_samples[lanczos_steps], samples);
+      } else {
+        data.run_complete_samples =
+            std::max(data.run_complete_samples, read_pod<std::int32_t>(payload, cursor));
+      }
     } else {
-      fail("Unknown v2 checkpoint record kind: " + std::to_string(kind_value));
+      fail("Unknown checkpoint record kind: " + std::to_string(kind_value));
     }
-    if (cursor != payload.size()) fail("Unexpected trailing bytes in v2 checkpoint record.");
+    if (cursor != payload.size()) fail("Unexpected trailing bytes in checkpoint record.");
     data.valid_bytes = static_cast<std::uint64_t>(in.tellg());
   }
   return data;
@@ -440,19 +530,44 @@ void truncate_to_valid_bytes(const std::string& path, std::uint64_t valid_bytes)
 }
 
 Writer::Writer(std::string path) : path_(std::move(path)) {
-  initialize_v2_checkpoint(path_);
+  format_ = detect_format(path_);
+  if (format_ == Format::kMissing || format_ == Format::kEmpty) {
+    initialize_v2_checkpoint(path_);
+    format_ = Format::kV2;
+  }
+  if (format_ != Format::kV2 && format_ != Format::kV3) {
+    fail("Writer requires a v2 or v3 checkpoint: " + path_);
+  }
 }
 
 void Writer::append_sample(const SampleRecord& record) {
-  std::vector<std::uint8_t> payload;
-  append_key(payload, record.key);
-  append_pod(payload, static_cast<std::int32_t>(record.particles));
-  append_pod(payload, record.basis_dim);
-  append_pod(payload, static_cast<std::int32_t>(record.sample_id));
-  append_double_vector(payload, record.eigenvalues);
-  append_double_vector(payload, record.overlaps);
+  append_sample_bundle({record});
+}
+
+void Writer::append_sample_bundle(const std::vector<SampleRecord>& records) {
+  std::vector<std::pair<RecordKind, std::vector<std::uint8_t>>> encoded;
+  encoded.reserve(records.size());
+  for (const SampleRecord& record : records) {
+    if (record.sample_id < 0 || record.eigenvalues.size() != record.overlaps.size()) {
+      fail("Invalid sample record passed to checkpoint writer.");
+    }
+    std::vector<std::uint8_t> payload;
+    append_key(payload, record.key);
+    append_pod(payload, static_cast<std::int32_t>(record.particles));
+    append_pod(payload, record.basis_dim);
+    append_pod(payload, static_cast<std::int32_t>(record.sample_id));
+    if (format_ == Format::kV3) {
+      if (record.lanczos_steps <= 0) {
+        fail("V3 sample record requires positive Lanczos steps.");
+      }
+      append_pod(payload, static_cast<std::int32_t>(record.lanczos_steps));
+    }
+    append_double_vector(payload, record.eigenvalues);
+    append_double_vector(payload, record.overlaps);
+    encoded.emplace_back(RecordKind::kSample, std::move(payload));
+  }
   std::lock_guard<std::mutex> lock(mutex_);
-  append_record(path_, RecordKind::kSample, payload);
+  append_records(path_, format_, encoded);
 }
 
 void Writer::append_exact(const ExactRecord& record) {
@@ -462,31 +577,43 @@ void Writer::append_exact(const ExactRecord& record) {
   append_pod(payload, record.basis_dim);
   append_double_vector(payload, record.eigenvalues);
   std::lock_guard<std::mutex> lock(mutex_);
-  append_record(path_, RecordKind::kExact, payload);
+  append_record(path_, format_, RecordKind::kExact, payload);
 }
 
-void Writer::append_block_complete(const BlockKey& key, int samples) {
+void Writer::append_block_complete(const BlockKey& key, int samples, int lanczos_steps) {
   std::vector<std::uint8_t> payload;
   append_key(payload, key);
+  if (format_ == Format::kV3) {
+    if (lanczos_steps <= 0) fail("V3 block marker requires positive Lanczos steps.");
+    append_pod(payload, static_cast<std::int32_t>(lanczos_steps));
+  }
   append_pod(payload, static_cast<std::int32_t>(samples));
   std::lock_guard<std::mutex> lock(mutex_);
-  append_record(path_, RecordKind::kBlockComplete, payload);
+  append_record(path_, format_, RecordKind::kBlockComplete, payload);
 }
 
-void Writer::append_sector_complete(const SectorKey& key, int samples) {
+void Writer::append_sector_complete(const SectorKey& key, int samples, int lanczos_steps) {
   std::vector<std::uint8_t> payload;
   append_pod(payload, static_cast<std::int32_t>(key.n_up));
   append_pod(payload, static_cast<std::int32_t>(key.n_down));
+  if (format_ == Format::kV3) {
+    if (lanczos_steps <= 0) fail("V3 sector marker requires positive Lanczos steps.");
+    append_pod(payload, static_cast<std::int32_t>(lanczos_steps));
+  }
   append_pod(payload, static_cast<std::int32_t>(samples));
   std::lock_guard<std::mutex> lock(mutex_);
-  append_record(path_, RecordKind::kSectorComplete, payload);
+  append_record(path_, format_, RecordKind::kSectorComplete, payload);
 }
 
-void Writer::append_run_complete(int samples) {
+void Writer::append_run_complete(int samples, int lanczos_steps) {
   std::vector<std::uint8_t> payload;
+  if (format_ == Format::kV3) {
+    if (lanczos_steps <= 0) fail("V3 run marker requires positive Lanczos steps.");
+    append_pod(payload, static_cast<std::int32_t>(lanczos_steps));
+  }
   append_pod(payload, static_cast<std::int32_t>(samples));
   std::lock_guard<std::mutex> lock(mutex_);
-  append_record(path_, RecordKind::kRunComplete, payload);
+  append_record(path_, format_, RecordKind::kRunComplete, payload);
 }
 
 std::vector<ManifestEntry> build_manifest(
@@ -549,37 +676,61 @@ std::vector<ManifestEntry> build_manifest(
   return manifest;
 }
 
-int contiguous_samples(const CheckpointData& data, const BlockKey& key) {
+bool has_sample(
+    const CheckpointData& data,
+    const BlockKey& key,
+    int sample_id,
+    int lanczos_steps) {
+  if (data.format == Format::kV3) {
+    if (lanczos_steps <= 0) fail("V3 sample lookup requires positive Lanczos steps.");
+    const auto block = data.depth_samples.find(key);
+    if (block == data.depth_samples.end()) return false;
+    const auto sample = block->second.find(sample_id);
+    return sample != block->second.end() &&
+        sample->second.find(lanczos_steps) != sample->second.end();
+  }
   const auto block = data.samples.find(key);
-  if (block == data.samples.end()) return 0;
+  return block != data.samples.end() && block->second.find(sample_id) != block->second.end();
+}
+
+int contiguous_samples(
+    const CheckpointData& data,
+    const BlockKey& key,
+    int lanczos_steps) {
   int count = 0;
-  while (block->second.find(count) != block->second.end()) ++count;
+  while (has_sample(data, key, count, lanczos_steps)) ++count;
   return count;
 }
 
 bool block_complete(
     const CheckpointData& data,
     const ManifestEntry& entry,
-    int target_samples) {
+    int target_samples,
+    int lanczos_steps) {
   if (data.format == Format::kV1) {
     return data.legacy_blocks.find(entry.key) != data.legacy_blocks.end();
   }
   if (entry.exact) return data.exact_blocks.find(entry.key) != data.exact_blocks.end();
-  return contiguous_samples(data, entry.key) >= target_samples;
+  return contiguous_samples(data, entry.key, lanczos_steps) >= target_samples;
 }
 
 CompletionStatus completion_status(
     const CheckpointData& data,
     const std::vector<ManifestEntry>& manifest,
-    int target_samples) {
+    int target_samples,
+    int lanczos_steps) {
   if (target_samples <= 0) fail("Target sample count must be positive.");
+  if (data.format == Format::kV3 && lanczos_steps <= 0) {
+    fail("V3 completion status requires positive Lanczos steps.");
+  }
   CompletionStatus status;
   status.target_samples = target_samples;
+  status.target_lanczos_steps = lanczos_steps;
   status.expected_blocks = manifest.size();
   status.minimum_complete_samples = std::numeric_limits<int>::max();
   for (const ManifestEntry& entry : manifest) {
     if (entry.exact) {
-      if (block_complete(data, entry, target_samples)) {
+      if (block_complete(data, entry, target_samples, lanczos_steps)) {
         ++status.completed_blocks;
       } else if (!status.has_next_missing) {
         status.has_next_missing = true;
@@ -597,7 +748,7 @@ CompletionStatus completion_status(
       contiguous = data.legacy_blocks.find(entry.key) != data.legacy_blocks.end()
           ? target_samples : 0;
     } else {
-      contiguous = contiguous_samples(data, entry.key);
+      contiguous = contiguous_samples(data, entry.key, lanczos_steps);
     }
     status.minimum_complete_samples = std::min(status.minimum_complete_samples, contiguous);
     int present_for_target = 0;
@@ -605,10 +756,8 @@ CompletionStatus completion_status(
     if (data.format == Format::kV1) {
       present_for_target = contiguous;
     } else {
-      const auto block = data.samples.find(entry.key);
       for (int sample_id = 0; sample_id < target_samples; ++sample_id) {
-        const bool present = block != data.samples.end() &&
-            block->second.find(sample_id) != block->second.end();
+        const bool present = has_sample(data, entry.key, sample_id, lanczos_steps);
         if (present) {
           ++present_for_target;
         } else if (first_missing < 0) {
@@ -624,6 +773,7 @@ CompletionStatus completion_status(
       status.has_next_missing = true;
       status.next_block = entry.key;
       status.next_sample_id = first_missing >= 0 ? first_missing : contiguous;
+      status.next_lanczos_steps = lanczos_steps;
     }
   }
   if (status.minimum_complete_samples == std::numeric_limits<int>::max()) {
@@ -643,18 +793,23 @@ ThermoGrid reduce_checkpoint(
     int sites,
     const std::vector<double>& beta_values,
     const std::vector<double>& mu_values,
-    int legacy_samples) {
+    int legacy_samples,
+    int lanczos_steps) {
   if (sites <= 0 || beta_values.empty() || mu_values.empty()) fail("Invalid reducer grid.");
   if (data.format == Format::kV1 && target_samples != legacy_samples) {
     fail("A v1 checkpoint can only be reduced at its original sample count " +
          std::to_string(legacy_samples) + ".");
   }
-  const CompletionStatus status = completion_status(data, manifest, target_samples);
+  const CompletionStatus status =
+      completion_status(data, manifest, target_samples, lanczos_steps);
   if (!status.complete) {
     std::string next = "; next missing " + block_key_text(status.next_block);
     next += status.next_sample_id >= 0
         ? " sample=" + std::to_string(status.next_sample_id)
         : " exact record";
+    if (data.format == Format::kV3) {
+      next += " m=" + std::to_string(lanczos_steps);
+    }
     fail("Checkpoint is incomplete for R=" + std::to_string(target_samples) + next);
   }
 
@@ -706,12 +861,28 @@ ThermoGrid reduce_checkpoint(
       }
       for (const ManifestEntry& entry : manifest) {
         if (entry.exact) continue;
-        const auto block = data.samples.find(entry.key);
-        if (block == data.samples.end()) fail("Missing sample block during reduction.");
         const double log_prefactor =
             std::log(static_cast<double>(entry.basis_dim)) - std::log(target_samples);
         for (int sample_id = 0; sample_id < target_samples; ++sample_id) {
-          const SampleRecord& record = block->second.at(sample_id);
+          const SampleRecord* record_ptr = nullptr;
+          if (data.format == Format::kV3) {
+            const auto block = data.depth_samples.find(entry.key);
+            if (block != data.depth_samples.end()) {
+              const auto sample = block->second.find(sample_id);
+              if (sample != block->second.end()) {
+                const auto depth = sample->second.find(lanczos_steps);
+                if (depth != sample->second.end()) record_ptr = &depth->second;
+              }
+            }
+          } else {
+            const auto block = data.samples.find(entry.key);
+            if (block != data.samples.end()) {
+              const auto sample = block->second.find(sample_id);
+              if (sample != block->second.end()) record_ptr = &sample->second;
+            }
+          }
+          if (record_ptr == nullptr) fail("Missing sample record during reduction.");
+          const SampleRecord& record = *record_ptr;
           for (std::size_t i = 0; i < record.eigenvalues.size(); ++i) {
             const double overlap = record.overlaps[i];
             if (!(overlap > 0.0)) continue;
@@ -804,7 +975,11 @@ std::string block_key_text(const BlockKey& key) {
 std::string status_text(const CompletionStatus& status) {
   std::ostringstream out;
   out << std::fixed << std::setprecision(2)
-      << "target_R=" << status.target_samples
+      << "target_R=" << status.target_samples;
+  if (status.target_lanczos_steps > 0) {
+    out << " target_m=" << status.target_lanczos_steps;
+  }
+  out
       << " min_complete_R=" << status.minimum_complete_samples
       << " samples=" << status.durable_sample_records << '/'
       << status.expected_sample_records
@@ -815,6 +990,9 @@ std::string status_text(const CompletionStatus& status) {
     out << " next=" << block_key_text(status.next_block);
     if (status.next_sample_id >= 0) {
       out << ",sample=" << status.next_sample_id;
+      if (status.next_lanczos_steps > 0) {
+        out << ",m=" << status.next_lanczos_steps;
+      }
     } else {
       out << ",exact-record";
     }

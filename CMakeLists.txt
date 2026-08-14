@@ -108,4 +108,13 @@ if(BUILD_TESTING)
       --reducer "$<TARGET_FILE:ftlm_reduce_checkpoint>"
   )
   set_tests_properties(incremental_checkpoint PROPERTIES TIMEOUT 120)
+
+  add_test(
+    NAME lanczos_prefix_checkpoint
+    COMMAND "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_lanczos_prefix_checkpoint.py"
+      --ftlm "$<TARGET_FILE:ftlm_n_vs_mu>"
+      --reducer "$<TARGET_FILE:ftlm_reduce_checkpoint>"
+  )
+  set_tests_properties(lanczos_prefix_checkpoint PROPERTIES TIMEOUT 180)
 endif()

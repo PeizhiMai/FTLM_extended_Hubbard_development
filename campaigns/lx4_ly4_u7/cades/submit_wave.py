@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -14,7 +15,7 @@ from pathlib import Path
 DEFAULT_ROOT = Path("/lustre/or-scratch24/scratch/9pm/ftlm_codex/lx4_ly4_u7_campaign")
 
 
-def checkpoint_status(reducer: Path, checkpoint: Path, samples: int):
+def checkpoint_status(reducer: Path, checkpoint: Path, samples: int, lanczos_steps: int):
     if not checkpoint.exists() or not Path(str(checkpoint) + ".meta").exists():
         return None
     checkpoint.parent.mkdir(parents=True, exist_ok=True)
@@ -26,6 +27,7 @@ def checkpoint_status(reducer: Path, checkpoint: Path, samples: int):
         result = subprocess.run(
             [
                 str(reducer), "--checkpoint", str(checkpoint), "--samples", str(samples),
+                "--lanczos-steps", str(lanczos_steps),
                 "--status-json", str(status_path),
             ],
             text=True,
@@ -57,6 +59,20 @@ def active_job(job_name: str) -> str | None:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--samples", type=int, required=True, help="target total R")
+    parser.add_argument("--lanczos-max-steps", type=int, default=80)
+    parser.add_argument(
+        "--lanczos-save-steps",
+        help="comma-separated prefixes saved from one recurrence (for example 80,120,300)",
+    )
+    parser.add_argument(
+        "--checkpoint-series",
+        default="legacy",
+        help="separate checkpoint namespace; use mext for multi-prefix runs",
+    )
+    parser.add_argument(
+        "--only-block",
+        help="optional resource-probe block NUP,NDOWN,MX,MY",
+    )
     parser.add_argument("--campaign-root", type=Path, default=DEFAULT_ROOT)
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--account", default="cnms")
@@ -70,12 +86,42 @@ def main():
     args = parser.parse_args()
     if args.samples <= 0:
         raise SystemExit("--samples must be positive")
+    if args.lanczos_max_steps <= 0:
+        raise SystemExit("--lanczos-max-steps must be positive")
+    if not args.checkpoint_series.replace("_", "").replace("-", "").isalnum():
+        raise SystemExit("--checkpoint-series may contain only letters, digits, '_' and '-'")
+    save_steps = args.lanczos_save_steps
+    if args.checkpoint_series != "legacy" and not save_steps:
+        save_steps = str(args.lanczos_max_steps)
+    if save_steps:
+        try:
+            parsed_steps = sorted({int(value) for value in save_steps.split(",")})
+        except ValueError as error:
+            raise SystemExit("--lanczos-save-steps must be comma-separated integers") from error
+        if not parsed_steps or parsed_steps[0] <= 0 or parsed_steps[-1] > args.lanczos_max_steps:
+            raise SystemExit("saved Lanczos steps must be in [1,--lanczos-max-steps]")
+        if args.lanczos_max_steps not in parsed_steps:
+            parsed_steps.append(args.lanczos_max_steps)
+            parsed_steps.sort()
+        save_steps = ",".join(map(str, parsed_steps))
+    only_block = None
+    if args.only_block:
+        try:
+            only_block = tuple(int(value) for value in args.only_block.split(","))
+        except ValueError as error:
+            raise SystemExit("--only-block expects NUP,NDOWN,MX,MY") from error
+        if len(only_block) != 4:
+            raise SystemExit("--only-block expects NUP,NDOWN,MX,MY")
 
     root = args.campaign_root.resolve()
     manifest = args.manifest or root / "source/campaigns/lx4_ly4_u7/twists.csv"
     reducer = root / "bin/ftlm_reduce_checkpoint"
     job_script = root / "source/campaigns/lx4_ly4_u7/cades/job_one_twist.sbatch"
-    gate_path = root / "RESOURCE_GATE_PASSED.json"
+    gate_path = root / (
+        "RESOURCE_GATE_PASSED.json"
+        if args.checkpoint_series == "legacy"
+        else "RESOURCE_GATE_M300_PASSED.json"
+    )
     if not args.allow_ungated and not gate_path.exists():
         raise SystemExit(f"resource gate is absent: {gate_path}")
     threads = 16
@@ -101,18 +147,37 @@ def main():
     for row in twists:
         twist_id = row["twist_id"]
         run_dir = root / f"runs/twist_{twist_id}"
-        checkpoint = run_dir / f"twist_{twist_id}.ftlmcp"
+        checkpoint_suffix = "" if args.checkpoint_series == "legacy" else f"_{args.checkpoint_series}"
+        checkpoint = run_dir / f"twist_{twist_id}{checkpoint_suffix}.ftlmcp"
         try:
-            status = checkpoint_status(reducer, checkpoint, args.samples)
+            status = checkpoint_status(
+                reducer, checkpoint, args.samples, args.lanczos_max_steps
+            )
         except RuntimeError as error:
             print(f"ERROR twist={twist_id} {error}")
             continue
-        if status and status["complete"]:
+        selected_complete = False
+        if status and only_block:
+            selected_complete = all(
+                (
+                    item["n_up"], item["n_down"], item["mx"], item["my"]
+                ) != only_block
+                for item in status["missing_blocks"]
+            )
+        if status and (status["complete"] or selected_complete):
             complete.append(twist_id)
-            print(f"REUSE twist={twist_id} target_R={args.samples} state=complete")
+            scope = "selected-block" if selected_complete and not status["complete"] else "run"
+            print(
+                f"REUSE twist={twist_id} target_R={args.samples} "
+                f"target_m={args.lanczos_max_steps} scope={scope} state=complete"
+            )
             continue
-        job_name = f"f4x4_{twist_id}"
-        running = active_job(job_name)
+        job_name = (
+            f"f4x4_{twist_id}"
+            if args.checkpoint_series == "legacy"
+            else f"f4x4_{args.checkpoint_series}_{twist_id}"
+        )
+        running = None if args.dry_run and shutil.which("squeue") is None else active_job(job_name)
         if running:
             active.append((twist_id, running))
             print(f"ACTIVE twist={twist_id} job={running}")
@@ -127,8 +192,20 @@ def main():
                 f"SEED={row['seed']}",
                 f"TARGET_R={args.samples}",
                 f"FTLM_THREADS={threads}",
+                f"LANCZOS_MAX_STEPS={args.lanczos_max_steps}",
+                f"LANCZOS_SAVE_STEPS={(save_steps or '').replace(',', ':')}",
+                f"CHECKPOINT_SERIES={args.checkpoint_series}",
             ]
         )
+        if only_block:
+            exports += "," + ",".join(
+                [
+                    f"ONLY_BLOCK_NUP={only_block[0]}",
+                    f"ONLY_BLOCK_NDOWN={only_block[1]}",
+                    f"ONLY_BLOCK_MX={only_block[2]}",
+                    f"ONLY_BLOCK_MY={only_block[3]}",
+                ]
+            )
         command = [
             "sbatch", "--parsable", "--account", args.account,
             "--job-name", job_name,
@@ -144,9 +221,13 @@ def main():
             result = subprocess.run(command, text=True, stdout=subprocess.PIPE, check=True)
             job_id = result.stdout.strip().split(";")[0]
             submitted.append((twist_id, job_id))
-            print(f"SUBMITTED twist={twist_id} job={job_id} target_R={args.samples}")
+            print(
+                f"SUBMITTED twist={twist_id} job={job_id} target_R={args.samples} "
+                f"target_m={args.lanczos_max_steps} series={args.checkpoint_series} mem=250G"
+            )
     print(
-        f"SUMMARY target_R={args.samples} complete={len(complete)} "
+        f"SUMMARY target_R={args.samples} target_m={args.lanczos_max_steps} "
+        f"series={args.checkpoint_series} complete={len(complete)} "
         f"active={len(active)} submitted={len(submitted)} total={len(twists)}"
     )
 

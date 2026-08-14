@@ -32,11 +32,19 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--campaign-root", type=Path, required=True)
     parser.add_argument("--samples", type=int, required=True)
+    parser.add_argument("--lanczos-steps", type=int, default=80)
+    parser.add_argument("--checkpoint-series", default="legacy")
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--skip-plot", action="store_true")
     args = parser.parse_args()
     root = args.campaign_root.resolve()
     tag = f"{args.samples:03d}"
+    m_tag = f"{args.lanczos_steps:03d}"
+    result_tag = (
+        f"R{tag}"
+        if args.checkpoint_series == "legacy"
+        else f"m{m_tag}_R{tag}"
+    )
     manifest = root / "source/campaigns/lx4_ly4_u7/twists.csv"
     with manifest.open(newline="") as stream:
         twists = list(csv.DictReader(stream))
@@ -46,7 +54,10 @@ def main():
         if float(row["phiy"]) < float(row["phix"]):
             raise SystemExit(f"manifest contains non-representative twist: {row}")
     inputs = [
-        root / f"runs/twist_{row['twist_id']}/twist_{row['twist_id']}_thermo_R{tag}.csv"
+        root / (
+            f"runs/twist_{row['twist_id']}/twist_{row['twist_id']}_thermo_"
+            f"{result_tag}.csv"
+        )
         for row in twists
     ]
     weights = [int(row.get("multiplicity", "1")) for row in twists]
@@ -63,7 +74,7 @@ def main():
     source = root / "source"
     output_dir = (args.output_dir or root / "averages").resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    average = output_dir / f"twist_average_R{tag}.csv"
+    average = output_dir / f"twist_average_{result_tag}.csv"
     subprocess.run(
         [
             sys.executable,
@@ -89,7 +100,7 @@ def main():
                 sys.executable,
                 str(source / "scripts/plot_compressibility_vs_hole_doping.py"),
                 str(average),
-                "--output", str(output_dir / f"compressibility_vs_x_R{tag}.png"),
+                "--output", str(output_dir / f"compressibility_vs_x_{result_tag}.png"),
             ],
             check=True,
         )

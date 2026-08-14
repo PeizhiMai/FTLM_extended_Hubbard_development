@@ -65,6 +65,8 @@ struct Params {
   int mu_count = 61;
   int samples = 5;
   int lanczos_steps = 80;
+  std::vector<int> lanczos_save_steps;
+  bool lanczos_save_steps_explicit = false;
   int threads = 0;
   std::size_t exact_block_threshold = 256;
   std::uint64_t seed = 12345;
@@ -193,6 +195,16 @@ extern "C" void zheev_(
     double* rwork,
     int* info);
 
+extern "C" void dstev_(
+    char* jobz,
+    int* n,
+    double* d,
+    double* e,
+    double* z,
+    int* ldz,
+    double* work,
+    int* info);
+
 template <typename T>
 T parse_value(const std::string& text) {
   std::istringstream in(text);
@@ -216,6 +228,22 @@ std::vector<double> parse_double_list(const std::string& text) {
   }
   if (values.empty()) {
     die("Expected at least one value in comma-separated list: " + text);
+  }
+  return values;
+}
+
+std::vector<int> parse_int_list(const std::string& text) {
+  std::vector<int> values;
+  std::istringstream in(text);
+  std::string item;
+  while (std::getline(in, item, ',')) {
+    if (item.empty()) {
+      die("Empty entry in comma-separated integer list: " + text);
+    }
+    values.push_back(parse_value<int>(item));
+  }
+  if (values.empty()) {
+    die("Expected at least one value in comma-separated integer list: " + text);
   }
   return values;
 }
@@ -253,6 +281,8 @@ void print_help(const char* argv0) {
       << "  --mu-count N          number of mu points\n"
       << "  --samples N           target total FTLM random vectors per k block\n"
       << "  --lanczos-steps N     Lanczos steps per random vector\n"
+      << "  --lanczos-save-steps LIST\n"
+      << "                        save compact spectra at these prefixes in one recurrence\n"
       << "  --threads N           OpenMP threads (0 uses runtime default)\n"
       << "  --exact-block-threshold N\n"
       << "                        use exact diagonalization for k blocks with dimension <= N\n"
@@ -326,6 +356,9 @@ Params parse_args(int argc, char** argv) {
       p.samples = parse_value<int>(next(arg));
     } else if (arg == "--lanczos-steps") {
       p.lanczos_steps = parse_value<int>(next(arg));
+    } else if (arg == "--lanczos-save-steps") {
+      p.lanczos_save_steps = parse_int_list(next(arg));
+      p.lanczos_save_steps_explicit = true;
     } else if (arg == "--threads") {
       p.threads = parse_value<int>(next(arg));
     } else if (arg == "--exact-block-threshold") {
@@ -391,6 +424,19 @@ Params parse_args(int argc, char** argv) {
   if (p.samples <= 0 || p.lanczos_steps <= 0) {
     die("--samples and --lanczos-steps must be positive.");
   }
+  if (p.lanczos_save_steps.empty()) {
+    p.lanczos_save_steps = {p.lanczos_steps};
+  }
+  for (int steps : p.lanczos_save_steps) {
+    if (steps <= 0 || steps > p.lanczos_steps) {
+      die("Every --lanczos-save-steps entry must be in [1,--lanczos-steps].");
+    }
+  }
+  p.lanczos_save_steps.push_back(p.lanczos_steps);
+  std::sort(p.lanczos_save_steps.begin(), p.lanczos_save_steps.end());
+  p.lanczos_save_steps.erase(
+      std::unique(p.lanczos_save_steps.begin(), p.lanczos_save_steps.end()),
+      p.lanczos_save_steps.end());
   if (p.threads < 0) {
     die("--threads must be non-negative.");
   }
@@ -409,6 +455,9 @@ Params parse_args(int argc, char** argv) {
        p.only_block_mx < 0 || p.only_block_mx >= p.lx ||
        p.only_block_my < 0 || p.only_block_my >= p.ly)) {
     die("--only-block is outside the requested lattice sectors/momenta.");
+  }
+  if (p.lanczos_save_steps_explicit && p.checkpoint.empty()) {
+    die("--lanczos-save-steps requires --checkpoint so every prefix remains reusable.");
   }
   const bool partial_block_debug =
       (p.debug_block_nup >= 0) || (p.debug_block_ndown >= 0) ||
@@ -464,6 +513,30 @@ std::string checkpoint_metadata_text_v2(const Params& params) {
   return out.str();
 }
 
+std::string checkpoint_metadata_text_v3(const Params& params) {
+  std::ostringstream out;
+  out << std::setprecision(17)
+      << "format=3\n"
+      << "rng_version=" << ftlm_checkpoint::kRngVersion << "\n"
+      << "rng_algorithm=" << ftlm_checkpoint::kRngAlgorithm << "\n"
+      << "seed_derivation=" << ftlm_checkpoint::kSeedDerivation << "\n"
+      << "spectrum_semantics=lanczos_prefix_ritz_v1\n"
+      << "lx=" << params.lx << "\n"
+      << "ly=" << params.ly << "\n"
+      << "tx=" << params.tx << "\n"
+      << "ty=" << params.ty << "\n"
+      << "tp=" << params.tp << "\n"
+      << "phix=" << params.phix << "\n"
+      << "phiy=" << params.phiy << "\n"
+      << "u=" << params.u << "\n"
+      << "v=" << params.v << "\n"
+      // Deliberately omit target R, m_max, and saved-prefix list.  V3 is
+      // append-only in both permanent sample ID and Lanczos depth.
+      << "exact_block_threshold=" << params.exact_block_threshold << "\n"
+      << "seed=" << params.seed << "\n";
+  return out.str();
+}
+
 ftlm_checkpoint::Format validate_or_write_checkpoint_metadata(const Params& params) {
   if (params.checkpoint.empty()) {
     return ftlm_checkpoint::Format::kMissing;
@@ -471,16 +544,32 @@ ftlm_checkpoint::Format validate_or_write_checkpoint_metadata(const Params& para
   ftlm_checkpoint::Format format = ftlm_checkpoint::detect_format(params.checkpoint);
   if (format == ftlm_checkpoint::Format::kMissing ||
       format == ftlm_checkpoint::Format::kEmpty) {
-    ftlm_checkpoint::initialize_v2_checkpoint(params.checkpoint);
-    format = ftlm_checkpoint::Format::kV2;
+    if (params.lanczos_save_steps_explicit) {
+      ftlm_checkpoint::initialize_v3_checkpoint(params.checkpoint);
+      format = ftlm_checkpoint::Format::kV3;
+    } else {
+      ftlm_checkpoint::initialize_v2_checkpoint(params.checkpoint);
+      format = ftlm_checkpoint::Format::kV2;
+    }
   }
   if (format == ftlm_checkpoint::Format::kUnknown) {
     die("Checkpoint has an unrecognized format: " + params.checkpoint);
   }
   const std::string path = params.checkpoint + ".meta";
+  if (format == ftlm_checkpoint::Format::kV2 &&
+      (params.lanczos_save_steps.size() != 1 ||
+       params.lanczos_save_steps.front() != params.lanczos_steps)) {
+    die("A v2 checkpoint cannot store multiple Lanczos prefixes; use a new checkpoint path.");
+  }
+  if (format == ftlm_checkpoint::Format::kV1 &&
+      params.lanczos_save_steps.size() != 1) {
+    die("A v1 checkpoint cannot store multiple Lanczos prefixes; use a new checkpoint path.");
+  }
   const std::string expected = format == ftlm_checkpoint::Format::kV1
       ? checkpoint_metadata_text_v1(params)
-      : checkpoint_metadata_text_v2(params);
+      : (format == ftlm_checkpoint::Format::kV3
+             ? checkpoint_metadata_text_v3(params)
+             : checkpoint_metadata_text_v2(params));
   {
     std::ifstream in(path);
     if (in) {
@@ -1126,7 +1215,7 @@ std::vector<double> diagonalize_block_exact(const MomentumBlock& block) {
   return eigenvalues;
 }
 
-void jacobi_diagonalize(
+[[maybe_unused]] void jacobi_diagonalize(
     std::vector<std::vector<double>>& matrix,
     std::vector<double>& eigenvalues,
     std::vector<std::vector<double>>& eigenvectors) {
@@ -1142,7 +1231,9 @@ void jacobi_diagonalize(
     return;
   }
 
-  eigenvectors.assign(static_cast<std::size_t>(n), std::vector<double>(static_cast<std::size_t>(n), 0.0));
+  eigenvectors.assign(
+      static_cast<std::size_t>(n),
+      std::vector<double>(static_cast<std::size_t>(n), 0.0));
   for (int i = 0; i < n; ++i) {
     eigenvectors[static_cast<std::size_t>(i)][static_cast<std::size_t>(i)] = 1.0;
   }
@@ -1153,7 +1244,8 @@ void jacobi_diagonalize(
     double max_offdiag = 0.0;
     for (int i = 0; i < n; ++i) {
       for (int j = i + 1; j < n; ++j) {
-        const double value = std::abs(matrix[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)]);
+        const double value =
+            std::abs(matrix[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)]);
         if (value > max_offdiag) {
           max_offdiag = value;
           p = i;
@@ -1161,23 +1253,20 @@ void jacobi_diagonalize(
         }
       }
     }
-    if (max_offdiag < 1e-12) {
-      break;
-    }
+    if (max_offdiag < 1e-12) break;
 
     const double app = matrix[static_cast<std::size_t>(p)][static_cast<std::size_t>(p)];
     const double aqq = matrix[static_cast<std::size_t>(q)][static_cast<std::size_t>(q)];
     const double apq = matrix[static_cast<std::size_t>(p)][static_cast<std::size_t>(q)];
     const double tau = (aqq - app) / (2.0 * apq);
     const double t =
-        (tau >= 0.0 ? 1.0 : -1.0) / (std::abs(tau) + std::sqrt(1.0 + tau * tau));
+        (tau >= 0.0 ? 1.0 : -1.0) /
+        (std::abs(tau) + std::sqrt(1.0 + tau * tau));
     const double c = 1.0 / std::sqrt(1.0 + t * t);
     const double s = t * c;
 
     for (int k = 0; k < n; ++k) {
-      if (k == p || k == q) {
-        continue;
-      }
+      if (k == p || k == q) continue;
       const double mkp = matrix[static_cast<std::size_t>(k)][static_cast<std::size_t>(p)];
       const double mkq = matrix[static_cast<std::size_t>(k)][static_cast<std::size_t>(q)];
       matrix[static_cast<std::size_t>(k)][static_cast<std::size_t>(p)] = c * mkp - s * mkq;
@@ -1205,20 +1294,60 @@ void jacobi_diagonalize(
 
   eigenvalues.resize(static_cast<std::size_t>(n));
   for (int i = 0; i < n; ++i) {
-    eigenvalues[static_cast<std::size_t>(i)] = matrix[static_cast<std::size_t>(i)][static_cast<std::size_t>(i)];
+    eigenvalues[static_cast<std::size_t>(i)] =
+        matrix[static_cast<std::size_t>(i)][static_cast<std::size_t>(i)];
   }
 }
 
 struct LanczosSample {
+  int lanczos_steps = 0;
   std::vector<double> eigenvalues;
   std::vector<double> overlaps;
 };
 
-LanczosSample run_ftlm_sample(
+LanczosSample diagonalize_lanczos_prefix(
+    const std::vector<double>& alpha,
+    const std::vector<double>& beta,
+    int requested_steps) {
+  int n = std::min<int>(requested_steps, static_cast<int>(alpha.size()));
+  if (n <= 0) die("Cannot diagonalize an empty Lanczos recurrence.");
+  std::vector<double> diagonal(alpha.begin(), alpha.begin() + n);
+  std::vector<double> off_diagonal(static_cast<std::size_t>(std::max(1, n - 1)), 0.0);
+  for (int i = 0; i + 1 < n; ++i) {
+    off_diagonal[static_cast<std::size_t>(i)] = beta.at(static_cast<std::size_t>(i));
+  }
+  // LAPACK stores eigenvectors by column.  Only the first row is retained as
+  // the FTLM overlap, so the dense n^2 workspace is released immediately for
+  // each small tridiagonal prefix.
+  std::vector<double> eigenvectors(static_cast<std::size_t>(n) * n, 0.0);
+  std::vector<double> work(static_cast<std::size_t>(std::max(1, 2 * n - 2)), 0.0);
+  char jobz = 'V';
+  int ldz = n;
+  int info = 0;
+  dstev_(&jobz, &n, diagonal.data(), off_diagonal.data(),
+         eigenvectors.data(), &ldz, work.data(), &info);
+  if (info != 0) {
+    die("LAPACK dstev failed for Lanczos prefix m=" +
+        std::to_string(requested_steps) + " with info=" + std::to_string(info));
+  }
+
+  LanczosSample result;
+  result.lanczos_steps = requested_steps;
+  result.eigenvalues = std::move(diagonal);
+  result.overlaps.resize(static_cast<std::size_t>(n));
+  for (int column = 0; column < n; ++column) {
+    const double v1 = eigenvectors[static_cast<std::size_t>(column) * n];
+    result.overlaps[static_cast<std::size_t>(column)] = v1 * v1;
+  }
+  return result;
+}
+
+std::vector<LanczosSample> run_ftlm_prefix_samples(
     const MomentumBlock& block,
     const Params& params,
     std::uint64_t block_seed,
     int sample_id,
+    const std::vector<int>& save_steps,
     const std::function<void(int)>& step_callback = {}) {
   const int krylov_dim =
       std::min<int>(params.lanczos_steps, static_cast<int>(block.basis_dim));
@@ -1236,7 +1365,6 @@ LanczosSample run_ftlm_sample(
   alpha.reserve(static_cast<std::size_t>(krylov_dim));
   beta.reserve(static_cast<std::size_t>(krylov_dim));
 
-  int actual_steps = 0;
   double beta_prev = 0.0;
   for (int step = 0; step < krylov_dim; ++step) {
     apply_hamiltonian(block, q_cur, q_next);
@@ -1246,8 +1374,7 @@ LanczosSample run_ftlm_sample(
     }
     alpha.push_back(a);
     const double b = std::sqrt(complex_norm2(q_next));
-    ++actual_steps;
-    if (step_callback) step_callback(actual_steps);
+    if (step_callback) step_callback(step + 1);
     if (b < 1e-12 || step + 1 == krylov_dim) break;
     beta.push_back(b);
     q_prev.swap(q_cur);
@@ -1256,40 +1383,23 @@ LanczosSample run_ftlm_sample(
     beta_prev = b;
   }
 
-  std::vector<std::vector<double>> tri(
-      static_cast<std::size_t>(actual_steps),
-      std::vector<double>(static_cast<std::size_t>(actual_steps), 0.0));
-  for (int i = 0; i < actual_steps; ++i) {
-    tri[static_cast<std::size_t>(i)][static_cast<std::size_t>(i)] =
-        alpha[static_cast<std::size_t>(i)];
-    if (i + 1 < actual_steps) {
-      tri[static_cast<std::size_t>(i)][static_cast<std::size_t>(i + 1)] =
-          beta[static_cast<std::size_t>(i)];
-      tri[static_cast<std::size_t>(i + 1)][static_cast<std::size_t>(i)] =
-          beta[static_cast<std::size_t>(i)];
-    }
+  std::vector<LanczosSample> results;
+  results.reserve(save_steps.size());
+  for (int steps : save_steps) {
+    results.push_back(diagonalize_lanczos_prefix(alpha, beta, steps));
   }
+  return results;
+}
 
-  std::vector<double> eigenvalues;
-  std::vector<std::vector<double>> eigenvectors;
-  jacobi_diagonalize(tri, eigenvalues, eigenvectors);
-  std::vector<int> order(actual_steps);
-  std::iota(order.begin(), order.end(), 0);
-  std::sort(order.begin(), order.end(), [&](int lhs, int rhs) {
-    return eigenvalues[static_cast<std::size_t>(lhs)] <
-           eigenvalues[static_cast<std::size_t>(rhs)];
-  });
-
-  LanczosSample result;
-  result.eigenvalues.reserve(static_cast<std::size_t>(actual_steps));
-  result.overlaps.reserve(static_cast<std::size_t>(actual_steps));
-  for (int sorted = 0; sorted < actual_steps; ++sorted) {
-    const int original = order[static_cast<std::size_t>(sorted)];
-    const double v1 = eigenvectors[0][static_cast<std::size_t>(original)];
-    result.eigenvalues.push_back(eigenvalues[static_cast<std::size_t>(original)]);
-    result.overlaps.push_back(v1 * v1);
-  }
-  return result;
+LanczosSample run_ftlm_sample(
+    const MomentumBlock& block,
+    const Params& params,
+    std::uint64_t block_seed,
+    int sample_id,
+    const std::function<void(int)>& step_callback = {}) {
+  auto results = run_ftlm_prefix_samples(
+      block, params, block_seed, sample_id, {params.lanczos_steps}, step_callback);
+  return std::move(results.front());
 }
 
 LanczosSpectrum run_ftlm_block(
@@ -1711,7 +1821,7 @@ class ProgressReporter {
     {
       std::lock_guard<std::mutex> lock(checkpoint_mutex_);
       initial_status_ = ftlm_checkpoint::completion_status(
-          checkpoint_, manifest_, params_.samples);
+          checkpoint_, manifest_, params_.samples, params_.lanczos_steps);
     }
     monitor_ = std::thread([this]() { monitor_loop(); });
   }
@@ -1877,7 +1987,8 @@ class ProgressReporter {
     ftlm_checkpoint::CompletionStatus status;
     {
       std::lock_guard<std::mutex> lock(checkpoint_mutex_);
-      status = ftlm_checkpoint::completion_status(checkpoint_, manifest_, params_.samples);
+      status = ftlm_checkpoint::completion_status(
+          checkpoint_, manifest_, params_.samples, params_.lanczos_steps);
     }
     const StateSnapshot state = state_snapshot();
     long double active_weight = 0.0L;
@@ -1913,6 +2024,7 @@ class ProgressReporter {
           << " timestamp=" << iso_timestamp()
           << " twist=" << (params_.twist_id.empty() ? "-" : params_.twist_id)
           << " target_R=" << params_.samples
+          << " target_m=" << params_.lanczos_steps
           << " elapsed_s=" << elapsed
           << " min_complete_R=" << status.minimum_complete_samples
           << " samples=" << status.durable_sample_records << '/'
@@ -1945,6 +2057,7 @@ class ProgressReporter {
          << "\"timestamp\":\"" << iso_timestamp() << "\","
          << "\"twist\":\"" << (params_.twist_id.empty() ? "" : params_.twist_id) << "\","
          << "\"target_R\":" << params_.samples << ','
+         << "\"target_m\":" << params_.lanczos_steps << ','
          << "\"elapsed_seconds\":" << elapsed << ','
          << "\"minimum_complete_R\":" << status.minimum_complete_samples << ','
          << "\"durable_sample_records\":" << status.durable_sample_records << ','
@@ -2048,11 +2161,11 @@ class ProgressReporter {
   std::thread monitor_;
 };
 
-int run_v2_checkpoint_job(
+int run_extensible_checkpoint_job(
     const Params& params,
     const Lattice& lattice,
     const std::vector<double>& mu_values) {
-  if (params.checkpoint.empty()) die("v2 checkpoint execution requires --checkpoint.");
+  if (params.checkpoint.empty()) die("Extensible checkpoint execution requires --checkpoint.");
   g_stop_requested.store(false);
   g_signal_requested.store(false);
 #ifdef SIGUSR1
@@ -2062,9 +2175,11 @@ int run_v2_checkpoint_job(
 
   ftlm_checkpoint::CheckpointData checkpoint =
       ftlm_checkpoint::read_checkpoint(params.checkpoint, false);
-  if (checkpoint.format != ftlm_checkpoint::Format::kV2) {
-    die("Internal error: v2 runner received a non-v2 checkpoint.");
+  if (checkpoint.format != ftlm_checkpoint::Format::kV2 &&
+      checkpoint.format != ftlm_checkpoint::Format::kV3) {
+    die("Internal error: extensible runner received a non-v2/v3 checkpoint.");
   }
+  const bool depth_checkpoint = checkpoint.format == ftlm_checkpoint::Format::kV3;
   if (checkpoint.trailing_partial_record) {
     std::cout << "FTLM_PROGRESS event=REPAIR_TRAILING_RECORD valid_bytes="
               << checkpoint.valid_bytes << std::endl;
@@ -2080,15 +2195,37 @@ int run_v2_checkpoint_job(
   std::mutex checkpoint_mutex;
   ftlm_checkpoint::Writer writer(params.checkpoint);
   ProgressReporter progress(params, manifest, checkpoint, checkpoint_mutex);
+  const auto block_complete_at = [&](
+                                     const ftlm_checkpoint::ManifestEntry& entry,
+                                     int lanczos_steps) {
+    return ftlm_checkpoint::block_complete(
+        checkpoint, entry, params.samples, lanczos_steps);
+  };
   const auto is_block_complete = [&](const ftlm_checkpoint::ManifestEntry& entry) {
     std::lock_guard<std::mutex> lock(checkpoint_mutex);
-    return ftlm_checkpoint::block_complete(checkpoint, entry, params.samples);
+    if (!depth_checkpoint || entry.exact) {
+      return block_complete_at(entry, params.lanczos_steps);
+    }
+    for (int steps : params.lanczos_save_steps) {
+      if (!block_complete_at(entry, steps)) return false;
+    }
+    return true;
   };
   {
     std::lock_guard<std::mutex> lock(checkpoint_mutex);
+    std::ostringstream saved_depths;
+    for (std::size_t i = 0; i < params.lanczos_save_steps.size(); ++i) {
+      if (i > 0) saved_depths << ',';
+      saved_depths << params.lanczos_save_steps[i];
+    }
+    std::cout << "FTLM_PROGRESS event=LANCZOS_PREFIX_CONFIG target_m="
+              << params.lanczos_steps << " save_m=" << saved_depths.str()
+              << " recurrence_passes_per_sample=1 checkpoint_format="
+              << (depth_checkpoint ? 3 : 2) << std::endl;
     std::cout << "FTLM_PROGRESS event=RESUME "
               << ftlm_checkpoint::status_text(
-                     ftlm_checkpoint::completion_status(checkpoint, manifest, params.samples))
+                     ftlm_checkpoint::completion_status(
+                         checkpoint, manifest, params.samples, params.lanczos_steps))
               << std::endl;
   }
 
@@ -2102,12 +2239,23 @@ int run_v2_checkpoint_job(
       }
       const SectorKey sector_key{n_up, n_down};
       if (!params.only_block) {
-        int completed_samples = 0;
+        int completed_samples = std::numeric_limits<int>::max();
         {
           std::lock_guard<std::mutex> lock(checkpoint_mutex);
-          const auto marker = checkpoint.sector_complete_samples.find(sector_key);
-          if (marker != checkpoint.sector_complete_samples.end()) {
-            completed_samples = marker->second;
+          if (depth_checkpoint) {
+            const auto sector = checkpoint.sector_complete_depth_samples.find(sector_key);
+            for (int steps : params.lanczos_save_steps) {
+              int achieved = 0;
+              if (sector != checkpoint.sector_complete_depth_samples.end()) {
+                const auto marker = sector->second.find(steps);
+                if (marker != sector->second.end()) achieved = marker->second;
+              }
+              completed_samples = std::min(completed_samples, achieved);
+            }
+          } else {
+            const auto marker = checkpoint.sector_complete_samples.find(sector_key);
+            completed_samples = marker == checkpoint.sector_complete_samples.end()
+                ? 0 : marker->second;
           }
         }
         if (completed_samples >= params.samples) {
@@ -2129,6 +2277,7 @@ int run_v2_checkpoint_job(
           continue;
         }
         sector_entries.push_back(&entry);
+        if (params.only_block) selected_block_found = true;
         if (!is_block_complete(entry)) {
           sector_needs_work = true;
         }
@@ -2143,9 +2292,17 @@ int run_v2_checkpoint_job(
       }
       if (!sector_needs_work) {
         if (!params.only_block) {
-          writer.append_sector_complete(sector_key, params.samples);
-          std::lock_guard<std::mutex> lock(checkpoint_mutex);
-          checkpoint.sector_complete_samples[sector_key] = params.samples;
+          if (depth_checkpoint) {
+            for (int steps : params.lanczos_save_steps) {
+              writer.append_sector_complete(sector_key, params.samples, steps);
+              std::lock_guard<std::mutex> lock(checkpoint_mutex);
+              checkpoint.sector_complete_depth_samples[sector_key][steps] = params.samples;
+            }
+          } else {
+            writer.append_sector_complete(sector_key, params.samples);
+            std::lock_guard<std::mutex> lock(checkpoint_mutex);
+            checkpoint.sector_complete_samples[sector_key] = params.samples;
+          }
         }
         continue;
       }
@@ -2204,10 +2361,21 @@ int run_v2_checkpoint_job(
             std::vector<int> missing_samples;
             {
               std::lock_guard<std::mutex> lock(checkpoint_mutex);
-              const auto existing = checkpoint.samples.find(key);
               for (int sample_id = 0; sample_id < params.samples; ++sample_id) {
-                if (existing == checkpoint.samples.end() ||
-                    existing->second.find(sample_id) == existing->second.end()) {
+                bool missing = false;
+                if (depth_checkpoint) {
+                  for (int steps : params.lanczos_save_steps) {
+                    if (!ftlm_checkpoint::has_sample(
+                            checkpoint, key, sample_id, steps)) {
+                      missing = true;
+                      break;
+                    }
+                  }
+                } else {
+                  missing = !ftlm_checkpoint::has_sample(
+                      checkpoint, key, sample_id, params.lanczos_steps);
+                }
+                if (missing) {
                   missing_samples.push_back(sample_id);
                 }
               }
@@ -2224,25 +2392,48 @@ int run_v2_checkpoint_job(
               const int sample_id = missing_samples[static_cast<std::size_t>(index)];
               progress.start_sample(sample_id);
               try {
-                LanczosSample sample = run_ftlm_sample(
+                const std::vector<int> requested_steps = depth_checkpoint
+                    ? params.lanczos_save_steps
+                    : std::vector<int>{params.lanczos_steps};
+                std::vector<LanczosSample> prefix_samples = run_ftlm_prefix_samples(
                     block,
                     params,
                     block_seed,
                     sample_id,
+                    requested_steps,
                     [&](int step) { progress.update_sample_step(sample_id, step); });
-                ftlm_checkpoint::SampleRecord record;
-                record.key = key;
-                record.particles = block.particles;
-                record.basis_dim = block.basis_dim;
-                record.sample_id = sample_id;
-                record.eigenvalues = std::move(sample.eigenvalues);
-                record.overlaps = std::move(sample.overlaps);
-                writer.append_sample(record);
+                std::vector<ftlm_checkpoint::SampleRecord> records_to_append;
+                for (LanczosSample& sample : prefix_samples) {
+                  bool already_present = false;
+                  {
+                    std::lock_guard<std::mutex> lock(checkpoint_mutex);
+                    already_present = ftlm_checkpoint::has_sample(
+                        checkpoint, key, sample_id,
+                        depth_checkpoint ? sample.lanczos_steps : params.lanczos_steps);
+                  }
+                  if (already_present) continue;
+                  ftlm_checkpoint::SampleRecord record;
+                  record.key = key;
+                  record.particles = block.particles;
+                  record.basis_dim = block.basis_dim;
+                  record.sample_id = sample_id;
+                  record.lanczos_steps = depth_checkpoint ? sample.lanczos_steps : 0;
+                  record.eigenvalues = std::move(sample.eigenvalues);
+                  record.overlaps = std::move(sample.overlaps);
+                  records_to_append.push_back(std::move(record));
+                }
+                writer.append_sample_bundle(records_to_append);
                 {
                   std::lock_guard<std::mutex> lock(checkpoint_mutex);
-                  record.eigenvalues.clear();
-                  record.overlaps.clear();
-                  checkpoint.samples[key][sample_id] = record;
+                  for (ftlm_checkpoint::SampleRecord& record : records_to_append) {
+                    record.eigenvalues.clear();
+                    record.overlaps.clear();
+                    if (depth_checkpoint) {
+                      checkpoint.depth_samples[key][sample_id][record.lanczos_steps] = record;
+                    } else {
+                      checkpoint.samples[key][sample_id] = record;
+                    }
+                  }
                 }
                 progress.finish_sample(sample_id);
               } catch (...) {
@@ -2257,10 +2448,18 @@ int run_v2_checkpoint_job(
           }
 
           if (is_block_complete(entry)) {
-            writer.append_block_complete(key, params.samples);
-            {
-              std::lock_guard<std::mutex> lock(checkpoint_mutex);
-              checkpoint.block_complete_samples[key] = params.samples;
+            if (depth_checkpoint) {
+              for (int steps : params.lanczos_save_steps) {
+                writer.append_block_complete(key, params.samples, steps);
+                std::lock_guard<std::mutex> lock(checkpoint_mutex);
+                checkpoint.block_complete_depth_samples[key][steps] = params.samples;
+              }
+            } else {
+              writer.append_block_complete(key, params.samples);
+              {
+                std::lock_guard<std::mutex> lock(checkpoint_mutex);
+                checkpoint.block_complete_samples[key] = params.samples;
+              }
             }
           }
           progress.clear_block();
@@ -2279,10 +2478,18 @@ int run_v2_checkpoint_job(
           }
         }
         if (sector_complete) {
-          writer.append_sector_complete(sector_key, params.samples);
-          {
-            std::lock_guard<std::mutex> lock(checkpoint_mutex);
-            checkpoint.sector_complete_samples[sector_key] = params.samples;
+          if (depth_checkpoint) {
+            for (int steps : params.lanczos_save_steps) {
+              writer.append_sector_complete(sector_key, params.samples, steps);
+              std::lock_guard<std::mutex> lock(checkpoint_mutex);
+              checkpoint.sector_complete_depth_samples[sector_key][steps] = params.samples;
+            }
+          } else {
+            writer.append_sector_complete(sector_key, params.samples);
+            {
+              std::lock_guard<std::mutex> lock(checkpoint_mutex);
+              checkpoint.sector_complete_samples[sector_key] = params.samples;
+            }
           }
           progress.event("SECTOR_COMPLETE");
           progress.clear_sector();
@@ -2296,9 +2503,24 @@ int run_v2_checkpoint_job(
   }
 
   ftlm_checkpoint::CompletionStatus status;
+  bool all_depths_complete = true;
   {
     std::lock_guard<std::mutex> lock(checkpoint_mutex);
-    status = ftlm_checkpoint::completion_status(checkpoint, manifest, params.samples);
+    status = ftlm_checkpoint::completion_status(
+        checkpoint, manifest, params.samples, params.lanczos_steps);
+    if (depth_checkpoint) {
+      for (int steps : params.lanczos_save_steps) {
+        const auto depth_status = ftlm_checkpoint::completion_status(
+            checkpoint, manifest, params.samples, steps);
+        if (!depth_status.complete) {
+          all_depths_complete = false;
+          status = depth_status;
+          break;
+        }
+      }
+    } else {
+      all_depths_complete = status.complete;
+    }
   }
   if (params.only_block) {
     const BlockKey selected{
@@ -2313,34 +2535,52 @@ int run_v2_checkpoint_job(
     return complete ? 0 : 75;
   }
 
-  if (!status.complete) {
+  if (!status.complete || !all_depths_complete) {
     progress.event("RUN_INCOMPLETE");
     progress.stop();
     std::cout << "FTLM_STATUS " << ftlm_checkpoint::status_text(status) << std::endl;
     return 75;
   }
 
-  bool append_run_marker = false;
-  {
-    std::lock_guard<std::mutex> lock(checkpoint_mutex);
-    append_run_marker = checkpoint.run_complete_samples < params.samples;
-  }
-  if (append_run_marker) {
-    writer.append_run_complete(params.samples);
-    std::lock_guard<std::mutex> lock(checkpoint_mutex);
-    checkpoint.run_complete_samples = params.samples;
+  if (depth_checkpoint) {
+    for (int steps : params.lanczos_save_steps) {
+      bool append_run_marker = false;
+      {
+        std::lock_guard<std::mutex> lock(checkpoint_mutex);
+        append_run_marker = checkpoint.run_complete_depth_samples[steps] < params.samples;
+      }
+      if (append_run_marker) {
+        writer.append_run_complete(params.samples, steps);
+        std::lock_guard<std::mutex> lock(checkpoint_mutex);
+        checkpoint.run_complete_depth_samples[steps] = params.samples;
+      }
+    }
+  } else {
+    bool append_run_marker = false;
+    {
+      std::lock_guard<std::mutex> lock(checkpoint_mutex);
+      append_run_marker = checkpoint.run_complete_samples < params.samples;
+    }
+    if (append_run_marker) {
+      writer.append_run_complete(params.samples);
+      std::lock_guard<std::mutex> lock(checkpoint_mutex);
+      checkpoint.run_complete_samples = params.samples;
+    }
   }
   progress.event("RUN_COMPLETE");
   progress.stop();
   const ftlm_checkpoint::CheckpointData reduction_checkpoint =
-      ftlm_checkpoint::read_checkpoint(params.checkpoint, true);
+      ftlm_checkpoint::read_checkpoint(
+          params.checkpoint, true, params.lanczos_steps);
   const auto grid = ftlm_checkpoint::reduce_checkpoint(
       reduction_checkpoint,
       manifest,
       params.samples,
       lattice.sites,
       params.beta_values,
-      mu_values);
+      mu_values,
+      0,
+      params.lanczos_steps);
   ftlm_checkpoint::write_thermo_csv(
       params.output, params.beta_values, mu_values, grid);
   std::cout << "Wrote " << params.output << std::endl;
@@ -2370,8 +2610,9 @@ int main(int argc, char** argv) {
     }
     const ftlm_checkpoint::Format checkpoint_format =
         validate_or_write_checkpoint_metadata(params);
-    if (checkpoint_format == ftlm_checkpoint::Format::kV2) {
-      return run_v2_checkpoint_job(params, lattice, mu_values);
+    if (checkpoint_format == ftlm_checkpoint::Format::kV2 ||
+        checkpoint_format == ftlm_checkpoint::Format::kV3) {
+      return run_extensible_checkpoint_job(params, lattice, mu_values);
     }
     ensure_checkpoint_header(params.checkpoint);
     auto checkpoint_spectra = read_checkpoint(params.checkpoint);

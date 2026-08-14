@@ -12,6 +12,7 @@
 namespace ftlm_checkpoint {
 
 constexpr int kCheckpointVersion = 2;
+constexpr int kDepthCheckpointVersion = 3;
 constexpr int kRngVersion = 1;
 constexpr const char* kRngAlgorithm = "mt19937_64_box_muller53_v1";
 constexpr const char* kSeedDerivation = "splitmix64_block_sample_v1";
@@ -57,6 +58,7 @@ enum class Format {
   kEmpty,
   kV1,
   kV2,
+  kV3,
   kUnknown,
 };
 
@@ -65,6 +67,9 @@ struct SampleRecord {
   int particles = 0;
   std::uint64_t basis_dim = 0;
   int sample_id = -1;
+  // Zero for legacy/v2 records.  V3 records tag every compact Ritz spectrum
+  // by the Lanczos prefix length from which it was constructed.
+  int lanczos_steps = 0;
   std::vector<double> eigenvalues;
   std::vector<double> overlaps;
   std::uint64_t checksum = 0;
@@ -93,10 +98,20 @@ struct LegacyBlockRecord {
 struct CheckpointData {
   Format format = Format::kMissing;
   std::unordered_map<BlockKey, std::map<int, SampleRecord>, BlockKeyHash> samples;
+  // V3 layout: block -> permanent sample ID -> Lanczos prefix -> spectrum.
+  std::unordered_map<
+      BlockKey,
+      std::map<int, std::map<int, SampleRecord>>,
+      BlockKeyHash> depth_samples;
   std::unordered_map<BlockKey, ExactRecord, BlockKeyHash> exact_blocks;
   std::unordered_map<BlockKey, int, BlockKeyHash> block_complete_samples;
   std::unordered_map<SectorKey, int, SectorKeyHash> sector_complete_samples;
   int run_complete_samples = 0;
+  std::unordered_map<BlockKey, std::map<int, int>, BlockKeyHash>
+      block_complete_depth_samples;
+  std::unordered_map<SectorKey, std::map<int, int>, SectorKeyHash>
+      sector_complete_depth_samples;
+  std::map<int, int> run_complete_depth_samples;
   std::unordered_map<BlockKey, LegacyBlockRecord, BlockKeyHash> legacy_blocks;
   std::uint64_t valid_bytes = 0;
   bool trailing_partial_record = false;
@@ -122,6 +137,7 @@ struct ManifestEntry {
 
 struct CompletionStatus {
   int target_samples = 0;
+  int target_lanczos_steps = 0;
   int minimum_complete_samples = 0;
   std::uint64_t expected_sample_records = 0;
   std::uint64_t durable_sample_records = 0;
@@ -134,6 +150,7 @@ struct CompletionStatus {
   bool has_next_missing = false;
   BlockKey next_block;
   int next_sample_id = -1;
+  int next_lanczos_steps = 0;
 };
 
 struct ThermoPoint {
@@ -152,21 +169,29 @@ void write_metadata_if_missing(const std::string& path, const std::string& text)
 // Index-only mode retains record keys, IDs, checksums, and dimensions while
 // dropping compact spectra.  Production jobs use it so checkpoint growth does
 // not increase the resident spectrum payload; reducers request full payloads.
-CheckpointData read_checkpoint(const std::string& path, bool load_spectra = true);
+CheckpointData read_checkpoint(
+    const std::string& path,
+    bool load_spectra = true,
+    int spectrum_lanczos_steps = 0);
 void initialize_v2_checkpoint(const std::string& path);
+void initialize_v3_checkpoint(const std::string& path);
 void truncate_to_valid_bytes(const std::string& path, std::uint64_t valid_bytes);
 
 class Writer {
  public:
   explicit Writer(std::string path);
   void append_sample(const SampleRecord& record);
+  // Append all depth records for one random vector under one open/fsync.  Each
+  // prefix remains an independently checksummed record on disk.
+  void append_sample_bundle(const std::vector<SampleRecord>& records);
   void append_exact(const ExactRecord& record);
-  void append_block_complete(const BlockKey& key, int samples);
-  void append_sector_complete(const SectorKey& key, int samples);
-  void append_run_complete(int samples);
+  void append_block_complete(const BlockKey& key, int samples, int lanczos_steps = 0);
+  void append_sector_complete(const SectorKey& key, int samples, int lanczos_steps = 0);
+  void append_run_complete(int samples, int lanczos_steps = 0);
 
  private:
   std::string path_;
+  Format format_ = Format::kUnknown;
   std::mutex mutex_;
 };
 
@@ -178,17 +203,26 @@ std::vector<ManifestEntry> build_manifest(
 
 int contiguous_samples(
     const CheckpointData& data,
-    const BlockKey& key);
+    const BlockKey& key,
+    int lanczos_steps = 0);
+
+bool has_sample(
+    const CheckpointData& data,
+    const BlockKey& key,
+    int sample_id,
+    int lanczos_steps = 0);
 
 bool block_complete(
     const CheckpointData& data,
     const ManifestEntry& entry,
-    int target_samples);
+    int target_samples,
+    int lanczos_steps = 0);
 
 CompletionStatus completion_status(
     const CheckpointData& data,
     const std::vector<ManifestEntry>& manifest,
-    int target_samples);
+    int target_samples,
+    int lanczos_steps = 0);
 
 ThermoGrid reduce_checkpoint(
     const CheckpointData& data,
@@ -197,7 +231,8 @@ ThermoGrid reduce_checkpoint(
     int sites,
     const std::vector<double>& beta_values,
     const std::vector<double>& mu_values,
-    int legacy_samples = 0);
+    int legacy_samples = 0,
+    int lanczos_steps = 0);
 
 void write_thermo_csv(
     const std::string& path,

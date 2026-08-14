@@ -166,6 +166,25 @@ target resumes only missing IDs; increasing `--samples 16` to `--samples 32`
 generates only IDs `16-31`. Target `R` is deliberately not immutable metadata,
 while lattice/model/twist/seed/Lanczos depth/exact threshold/RNG version are.
 
+For Lanczos-depth convergence, request an append-only v3 checkpoint explicitly:
+
+```bash
+./build/ftlm_n_vs_mu \
+  --lx 4 --ly 4 --u 7 --samples 16 \
+  --lanczos-steps 300 \
+  --lanczos-save-steps 80,120,160,200,250,300 \
+  --checkpoint twist_000_mext.ftlmcp \
+  --output twist_000_m300_R16.csv
+```
+
+The Hamiltonian recurrence is run only once, through `m=300`, for each random
+vector. LAPACK diagonalizes the six small tridiagonal prefixes and the
+independently checksummed Ritz spectra are committed in one fsync bundle. V3
+does not make `R`, maximum depth, or the saved-prefix list immutable: increasing
+`R` computes only new permanent sample IDs; asking for a new/deeper prefix
+replays the same deterministic recurrence and appends only missing depth
+records. Existing lower-`R` and lower-`m` reductions remain byte reproducible.
+
 The process responds to `SIGUSR1`/`SIGTERM` by starting no more samples and
 finishing durable active samples. Progress is printed after every checkpoint and
 at the requested heartbeat interval. A partially written final record is
@@ -182,7 +201,24 @@ Reduce or inspect a checkpoint without reconstructing Hilbert-space bases:
 
 ./build/ftlm_reduce_checkpoint \
   --checkpoint twist_000.ftlmcp --samples 32 --status
+
+./build/ftlm_reduce_checkpoint \
+  --checkpoint twist_000_mext.ftlmcp --samples 16 \
+  --lanczos-steps 160 --beta-list 2.857142857142857,12.5 \
+  --mu-min -3 --mu-max 4 --mu-count 281 \
+  --output twist_000_m160_R16.csv
+
+./build/ftlm_reduce_checkpoint \
+  --checkpoint twist_000_mext.ftlmcp \
+  --samples-list 8,16 \
+  --lanczos-steps-list 80,120,160,200,250,300 \
+  --beta-list 2.857142857142857,12.5 \
+  --mu-min -3 --mu-max 4 --mu-count 281 \
+  --output-template 'twist_000_m{m}_R{R}.csv'
 ```
+
+Batch reduction scans the checkpoint once; `{m}` and `{R}` are replaced by
+zero-padded tags such as `080` and `016`.
 
 Status mode reports every missing sample ID and the next unit of work. Reduction
 at `R=32` is refused until every stochastic block has IDs `0-31`; lower-R
