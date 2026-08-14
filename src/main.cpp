@@ -1672,9 +1672,30 @@ class ProgressReporter {
     stop();
   }
 
+  void set_sector(const SectorKey& key, std::uint64_t dimension) {
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      current_sector_ = key;
+      current_sector_dimension_ = dimension;
+      has_current_sector_ = true;
+      has_current_block_ = false;
+      active_steps_.clear();
+      active_started_.clear();
+    }
+    emit("SECTOR_BUILD_START", -1);
+  }
+
+  void clear_sector() {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    has_current_sector_ = false;
+    current_sector_dimension_ = 0;
+  }
+
   void set_block(const BlockKey& key, std::uint64_t dimension) {
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
+      current_sector_ = {key.n_up, key.n_down};
+      has_current_sector_ = true;
       current_block_ = key;
       current_dimension_ = dimension;
       has_current_block_ = true;
@@ -1750,6 +1771,9 @@ class ProgressReporter {
 
  private:
   struct StateSnapshot {
+    bool has_sector = false;
+    SectorKey sector;
+    std::uint64_t sector_dimension = 0;
     bool has_block = false;
     BlockKey block;
     std::uint64_t dimension = 0;
@@ -1764,6 +1788,7 @@ class ProgressReporter {
   StateSnapshot state_snapshot() const {
     std::lock_guard<std::mutex> lock(state_mutex_);
     return {
+        has_current_sector_, current_sector_, current_sector_dimension_,
         has_current_block_, current_block_, current_dimension_, active_steps_, new_samples_,
         has_last_durable_sample_, last_durable_block_, last_durable_sample_id_,
         last_sample_duration_seconds_};
@@ -1851,9 +1876,12 @@ class ProgressReporter {
           << " reused_samples=" << initial_status_.durable_sample_records
           << " new_samples=" << state.new_samples;
     if (eta_hours >= 0.0) human << " eta_hours=" << eta_hours;
+    if (state.has_sector) {
+      human << " sector=" << state.sector.n_up << ',' << state.sector.n_down
+            << " sector_dim=" << state.sector_dimension;
+    }
     if (state.has_block) {
-      human << " sector=" << state.block.n_up << ',' << state.block.n_down
-            << " block=" << state.block.mx << ',' << state.block.my
+      human << " block=" << state.block.mx << ',' << state.block.my
             << " dim=" << state.dimension
             << " active_samples=" << active.str();
     }
@@ -1886,6 +1914,16 @@ class ProgressReporter {
          << "\"active_samples\":\"" << active.str() << "\","
          << "\"last_sample_duration_seconds\":"
          << state.last_sample_duration_seconds << ','
+         << "\"current_sector\":";
+    if (state.has_sector) {
+      json << '{'
+           << "\"n_up\":" << state.sector.n_up << ','
+           << "\"n_down\":" << state.sector.n_down << ','
+           << "\"full_dim\":" << state.sector_dimension << "},";
+    } else {
+      json << "null,";
+    }
+    json
          << "\"current_block\":";
     if (state.has_block) {
       json << '{'
@@ -1943,6 +1981,9 @@ class ProgressReporter {
   ftlm_checkpoint::CompletionStatus initial_status_;
   mutable std::mutex state_mutex_;
   std::mutex output_mutex_;
+  bool has_current_sector_ = false;
+  SectorKey current_sector_;
+  std::uint64_t current_sector_dimension_ = 0;
   bool has_current_block_ = false;
   BlockKey current_block_;
   std::uint64_t current_dimension_ = 0;
@@ -2067,6 +2108,7 @@ int run_v2_checkpoint_job(
 
       std::cout << "FTLM_PROGRESS event=SECTOR_START sector=" << n_up << ',' << n_down
                 << " full_dim=" << sector_dimension << std::endl;
+      progress.set_sector(sector_key, sector_dimension);
       const SectorBasis sector = build_sector_basis(lattice, n_up, n_down, params);
       if (sector.full_dim != sector_dimension) {
         die("Analytic and constructed sector dimensions disagree.");
@@ -2091,13 +2133,12 @@ int run_v2_checkpoint_job(
             break;
           }
 
+          progress.set_block(key, entry.basis_dim);
           const MomentumBlock block = build_momentum_block(sector, lattice, mx, my);
           if (block.basis_dim != entry.basis_dim) {
             die("Analytic and constructed momentum-block dimensions disagree for " +
                 ftlm_checkpoint::block_key_text(key));
           }
-          progress.set_block(key, block.basis_dim);
-
           if (entry.exact) {
             ftlm_checkpoint::ExactRecord record;
             record.key = key;
@@ -2196,6 +2237,7 @@ int run_v2_checkpoint_job(
             checkpoint.sector_complete_samples[sector_key] = params.samples;
           }
           progress.event("SECTOR_COMPLETE");
+          progress.clear_sector();
         }
       }
     }
