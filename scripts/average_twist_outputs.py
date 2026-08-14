@@ -10,12 +10,17 @@ def logsumexp(values):
     return top + math.log(sum(math.exp(value - top) for value in values))
 
 
-def sample_spread(values):
-    if len(values) < 2:
+def sample_spread(values, weights):
+    """Frequency-weighted spread, equivalent to expanding integer weights."""
+    count = sum(weights)
+    if count <= 1:
         return 0.0, 0.0
-    mean = sum(values) / len(values)
-    std = math.sqrt(sum((value - mean) ** 2 for value in values) / (len(values) - 1))
-    return std, std / math.sqrt(len(values))
+    mean = sum(weight * value for value, weight in zip(values, weights)) / count
+    std = math.sqrt(
+        sum(weight * (value - mean) ** 2 for value, weight in zip(values, weights))
+        / (count - 1)
+    )
+    return std, std / math.sqrt(count)
 
 
 def detect_observable(fieldnames):
@@ -31,11 +36,11 @@ def detect_observable(fieldnames):
     return None
 
 
-def read_rows(paths, single_beta):
+def read_rows(paths, single_beta, weights):
     layout_seen = False
     expected_observable = None
     expected_has_omega = None
-    for path in paths:
+    for path, input_weight in zip(paths, weights):
         with open(path, newline="") as f:
             reader = csv.DictReader(f)
             fieldnames = reader.fieldnames or []
@@ -55,6 +60,7 @@ def read_rows(paths, single_beta):
             for row in reader:
                 out = {
                     "path": path,
+                    "input_weight": input_weight,
                     "beta": float(row["beta"]) if has_beta else float(single_beta),
                     "mu": float(row["mu"]),
                     "omega": float(row["omega"]) if has_omega else None,
@@ -91,17 +97,38 @@ def main():
     parser.add_argument(
         "--expected-twists",
         type=int,
-        help="refuse output unless every (beta,mu[,omega]) group has this many twists",
+        help="refuse output unless every group has this many independent input files",
+    )
+    parser.add_argument(
+        "--weights",
+        help="comma-separated positive integer multiplicities, one per input file",
+    )
+    parser.add_argument(
+        "--expected-weight",
+        type=int,
+        help="refuse output unless the sum of input multiplicities has this value",
     )
     args = parser.parse_args()
 
     if args.mode == "partition-sum" and (args.sites is None or args.sites <= 0):
         raise SystemExit("--sites is required and must be positive for --mode partition-sum")
 
+    if args.weights:
+        try:
+            input_weights = [int(value) for value in args.weights.split(",")]
+        except ValueError as error:
+            raise SystemExit("--weights must be comma-separated positive integers") from error
+        if len(input_weights) != len(args.inputs):
+            raise SystemExit("--weights must contain exactly one value per input file")
+        if any(weight <= 0 for weight in input_weights):
+            raise SystemExit("--weights values must be positive")
+    else:
+        input_weights = [1] * len(args.inputs)
+
     groups = defaultdict(list)
     observable_name = None
     has_omega = False
-    for row in read_rows(args.inputs, args.single_beta):
+    for row in read_rows(args.inputs, args.single_beta, input_weights):
         observable_name = row["observable_name"] if observable_name is None else observable_name
         has_omega = row["omega"] is not None
         key = (row["beta"], row["mu"], row["omega"]) if has_omega else (row["beta"], row["mu"])
@@ -109,6 +136,8 @@ def main():
 
     if args.expected_twists is not None and args.expected_twists <= 0:
         raise SystemExit("--expected-twists must be positive")
+    if args.expected_weight is not None and args.expected_weight <= 0:
+        raise SystemExit("--expected-weight must be positive")
     for key, rows in groups.items():
         paths = [row["path"] for row in rows]
         if len(set(paths)) != len(paths):
@@ -116,6 +145,12 @@ def main():
         if args.expected_twists is not None and len(rows) != args.expected_twists:
             raise SystemExit(
                 f"grid key {key} has {len(rows)} twists; expected {args.expected_twists}"
+            )
+        weight_sum = sum(row["input_weight"] for row in rows)
+        if args.expected_weight is not None and weight_sum != args.expected_weight:
+            raise SystemExit(
+                f"grid key {key} has total multiplicity {weight_sum}; "
+                f"expected {args.expected_weight}"
             )
 
     with open(args.output, "w", newline="") as f:
@@ -136,6 +171,7 @@ def main():
             "compressibility_std",
             "compressibility_sem",
             "twist_count",
+            "twist_weight_sum",
             "mode",
             "log_partition",
         ]
@@ -153,29 +189,55 @@ def main():
             mu = key[1]
             omega = key[2] if has_omega else None
             if args.mode == "observable-average":
-                count = len(rows)
-                n = sum(row["n"] for row in rows) / count
-                charge = sum(row["charge_correlation"] for row in rows) / count
-                kappa = sum(row["compressibility"] for row in rows) / count
+                weights = [row["input_weight"] for row in rows]
+                weight_sum = sum(weights)
+                n = sum(weight * row["n"] for weight, row in zip(weights, rows)) / weight_sum
+                charge = sum(
+                    weight * row["charge_correlation"]
+                    for weight, row in zip(weights, rows)
+                ) / weight_sum
+                kappa = sum(
+                    weight * row["compressibility"]
+                    for weight, row in zip(weights, rows)
+                ) / weight_sum
                 obs = (
-                    sum(row["observable_value"] for row in rows) / count
+                    sum(
+                        weight * row["observable_value"]
+                        for weight, row in zip(weights, rows)
+                    ) / weight_sum
                     if observable_name
                     else None
                 )
-                n_std, n_sem = sample_spread([row["n"] for row in rows])
+                n_std, n_sem = sample_spread([row["n"] for row in rows], weights)
                 kappa_std, kappa_sem = sample_spread(
-                    [row["compressibility"] for row in rows]
+                    [row["compressibility"] for row in rows], weights
                 )
                 if observable_name:
                     obs_std, obs_sem = sample_spread(
-                        [row["observable_value"] for row in rows]
+                        [row["observable_value"] for row in rows], weights
                     )
-                logs = [row["log_partition"] for row in rows if row["log_partition"] is not None]
-                log_partition = logsumexp(logs) - math.log(len(logs)) if logs else ""
+                weighted_logs = [
+                    row["log_partition"] + math.log(row["input_weight"])
+                    for row in rows
+                    if row["log_partition"] is not None
+                ]
+                log_weight = sum(
+                    row["input_weight"]
+                    for row in rows
+                    if row["log_partition"] is not None
+                )
+                log_partition = (
+                    logsumexp(weighted_logs) - math.log(log_weight)
+                    if weighted_logs
+                    else ""
+                )
             else:
                 if any(row["log_partition"] is None for row in rows):
                     raise SystemExit("partition-sum mode requires log_partition in every input row")
-                logz = [row["log_partition"] for row in rows]
+                logz = [
+                    row["log_partition"] + math.log(row["input_weight"])
+                    for row in rows
+                ]
                 total_logz = logsumexp(logz)
                 weights = [math.exp(value - total_logz) for value in logz]
                 mean_n_total = 0.0
@@ -210,6 +272,7 @@ def main():
                 "compressibility_std": kappa_std,
                 "compressibility_sem": kappa_sem,
                 "twist_count": len(rows),
+                "twist_weight_sum": sum(row["input_weight"] for row in rows),
                 "mode": args.mode,
                 "log_partition": log_partition,
             }

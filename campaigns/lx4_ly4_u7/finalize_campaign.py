@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate, average, and plot a complete 16-twist target-R campaign."""
+"""Validate, symmetry-weight, and plot a complete target-R campaign."""
 
 from __future__ import annotations
 
@@ -37,10 +37,23 @@ def main():
     args = parser.parse_args()
     root = args.campaign_root.resolve()
     tag = f"{args.samples:03d}"
+    manifest = root / "source/campaigns/lx4_ly4_u7/twists.csv"
+    with manifest.open(newline="") as stream:
+        twists = list(csv.DictReader(stream))
+    if not twists:
+        raise SystemExit(f"empty twist manifest: {manifest}")
+    for row in twists:
+        if float(row["phiy"]) < float(row["phix"]):
+            raise SystemExit(f"manifest contains non-representative twist: {row}")
     inputs = [
-        root / f"runs/twist_{twist_id:03d}/twist_{twist_id:03d}_thermo_R{tag}.csv"
-        for twist_id in range(16)
+        root / f"runs/twist_{row['twist_id']}/twist_{row['twist_id']}_thermo_R{tag}.csv"
+        for row in twists
     ]
+    weights = [int(row.get("multiplicity", "1")) for row in twists]
+    if sum(weights) != 16:
+        raise SystemExit(
+            f"twist symmetry multiplicities sum to {sum(weights)}, expected full-grid weight 16"
+        )
     missing = [str(path) for path in inputs if not path.exists()]
     if missing:
         raise SystemExit("missing twist outputs:\n" + "\n".join(missing))
@@ -57,7 +70,9 @@ def main():
             str(source / "scripts/average_twist_outputs.py"),
             *map(str, inputs),
             "--mode", "observable-average",
-            "--expected-twists", "16",
+            "--weights", ",".join(map(str, weights)),
+            "--expected-twists", str(len(inputs)),
+            "--expected-weight", "16",
             "--output", str(average),
         ],
         check=True,
@@ -78,7 +93,10 @@ def main():
             ],
             check=True,
         )
-    print(f"validated_twists=16 average={average}")
+    print(
+        f"validated_representatives={len(inputs)} effective_twists={sum(weights)} "
+        f"average={average}"
+    )
 
 
 if __name__ == "__main__":

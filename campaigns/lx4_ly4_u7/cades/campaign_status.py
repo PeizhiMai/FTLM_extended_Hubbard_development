@@ -1,5 +1,5 @@
 #!/usr/bin/python3.11
-"""Print achieved-R/checkpoint/Slurm status for all sixteen twists."""
+"""Print achieved-R/checkpoint/Slurm status for all manifest twists."""
 
 from __future__ import annotations
 

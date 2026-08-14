@@ -124,6 +124,12 @@ Rows are combined at fixed `(beta,mu)` and the output includes
 that give different individual densities at the same `mu` do not require
 interpolation before the thermodynamic average.
 
+If symmetry-related twists are represented by one file, pass one positive
+integer multiplicity per input. For example, square-lattice representatives
+with diagonal weight one and off-diagonal weight two can reconstruct the full
+grid with `--weights 1,2,... --expected-weight 16`. `--expected-twists` still
+counts independently supplied files.
+
 `observable-average` is the usual equal-weight average of measured observables
 over twists. If you want to combine the twists by summing their partition
 functions instead, use the absolute `log_partition` column:

@@ -1,13 +1,13 @@
 # 4x4 U=7 compressibility campaign
 
-This directory fixes the production parameters used for the 16-twist CADES
-campaign:
+This directory fixes the production parameters used for the CADES campaign.
+It evaluates 10 symmetry-unique representatives of a 16-point twist grid:
 
 - `lx=ly=4`, `U=7`, `tx=ty=1`, `tp=V=0`
 - `m=80`, exact momentum-block threshold `256`
 - initial target `R=16` (with retained `R=8` reductions)
 - `beta=2.857142857142857,12.5` and 281 points on `mu=[-3,4]`
-- the 4x4 twist grid in `twists.csv`
+- the representatives with `phiy >= phix` in `twists.csv`
 - one exclusive `high_mem` node per twist, 16 cores, 220 GiB, four hours
 
 `twist_005` is `(phix,phiy)=(0.25,0.25)` and has permanent seed
@@ -67,7 +67,7 @@ First complete and validate twist 005 as the one-twist pilot:
 Each four-hour job stops internally after 210 minutes, appends every completed
 sample durably, and exits cleanly. Run the same pilot command again for another
 wave until twist 005 is complete. Only after that pilot and the resource gate
-pass, submit every remaining twist concurrently:
+pass, submit every remaining representative concurrently:
 
 ```bash
 /usr/bin/python3.11 source/campaigns/lx4_ly4_u7/cades/submit_wave.py --samples 16
@@ -84,10 +84,15 @@ can still be reduced exactly at `R=8` or `R=16`.
 
 ## Reduction, averaging, and the x axis
 
-Twists are combined at fixed `(beta,mu)`: average `n` and `kappa` over the 16
-twists, then set `x=1-mean(n)`. This handles the fact that individual twists
-have different densities at the same chemical potential without interpolating
-or averaging at mismatched thermodynamic control parameters.
+Twists are combined at fixed `(beta,mu)`: average `n` and `kappa`, then set
+`x=1-mean(n)`. Square-lattice axis exchange maps `(phix,phiy)` to
+`(phiy,phix)`, so only the 10 representatives with `phiy >= phix` are run.
+Diagonal representatives have multiplicity one and off-diagonal
+representatives have multiplicity two. The weighted result therefore equals
+the original 16-point quadrature; an unweighted average over the 10 files would
+be incorrect. Fixed-`mu` averaging also handles the fact that individual
+twists have different densities without interpolating mismatched thermodynamic
+control parameters.
 
 Once all twist CSVs exist:
 
@@ -96,9 +101,10 @@ Once all twist CSVs exist:
   --campaign-root "$CAMPAIGN_ROOT" --samples 16 --skip-plot
 ```
 
-The finalizer requires two betas, 281 rows per beta, monotone density,
-nonnegative compressibility, and complete `x=[0,0.35]` coverage. It writes the
-equal-observable twist average. CADES' system Python does not include
+The finalizer requires all 10 representatives (effective multiplicity 16), two
+betas, 281 rows per beta, monotone density, nonnegative compressibility, and
+complete `x=[0,0.35]` coverage. It writes the symmetry-weighted observable
+average. CADES' system Python does not include
 Matplotlib, so copy that average to the local workspace and make the
 publication-style PNG/PDF with the requested environment:
 

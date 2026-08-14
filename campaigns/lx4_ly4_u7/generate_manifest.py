@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the fixed 4x4 twist grid and permanent per-twist seeds."""
+"""Generate symmetry-unique representatives of the fixed 4x4 twist grid."""
 
 import csv
 from pathlib import Path
@@ -11,19 +11,22 @@ def main():
     with output.open("w", newline="") as stream:
         writer = csv.DictWriter(
             stream,
-            fieldnames=["twist_id", "phix", "phiy", "seed"],
+            fieldnames=["twist_id", "phix", "phiy", "seed", "multiplicity"],
             lineterminator="\n",
         )
         writer.writeheader()
         for iy, phiy in enumerate(values):
             for ix, phix in enumerate(values):
                 twist_id = iy * len(values) + ix
+                if phiy < phix:
+                    continue
                 writer.writerow(
                     {
                         "twist_id": f"{twist_id:03d}",
                         "phix": f"{phix:.2f}",
                         "phiy": f"{phiy:.2f}",
                         "seed": 12345 + 1000003 * twist_id,
+                        "multiplicity": 1 if phix == phiy else 2,
                     }
                 )
     print(output.resolve())
