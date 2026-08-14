@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -eo pipefail
+
+source /etc/profile
+set -u
 
 SOURCE_DIR=${1:?usage: build_cades.sh SOURCE_DIR BIN_DIR [intel|gcc]}
 BIN_DIR=${2:?usage: build_cades.sh SOURCE_DIR BIN_DIR [intel|gcc]}
 TOOLCHAIN=${3:-intel}
 BUILD_ROOT=${BUILD_ROOT:-"$SOURCE_DIR/build-cades-$TOOLCHAIN"}
 
-source /etc/profile
 module purge
 case "$TOOLCHAIN" in
   intel)

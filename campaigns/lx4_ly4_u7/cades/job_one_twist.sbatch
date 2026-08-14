@@ -10,7 +10,10 @@
 #SBATCH --time=04:00:00
 #SBATCH --signal=B:USR1@600
 
-set -euo pipefail
+set -eo pipefail
+
+source /etc/profile
+set -u
 
 : "${CAMPAIGN_ROOT:?CAMPAIGN_ROOT must be exported by submit_wave.py}"
 : "${TWIST_ID:?TWIST_ID must be exported by submit_wave.py}"
@@ -29,7 +32,6 @@ PROGRESS_STATE="$RUN_DIR/progress_state.json"
 TARGET_TAG=$(printf '%03d' "$TARGET_R")
 OUTPUT="$RUN_DIR/twist_${TWIST_ID}_thermo_R${TARGET_TAG}.csv"
 
-source /etc/profile
 module purge
 module load intel/2024.1.0 mkl/2024.1.0
 export OMP_NUM_THREADS="$THREADS"
