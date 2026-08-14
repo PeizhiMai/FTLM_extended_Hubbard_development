@@ -98,19 +98,12 @@ struct StateKey {
   }
 };
 
-struct StateKeyHash {
-  std::size_t operator()(const StateKey& key) const {
-    const std::size_t h1 = std::hash<std::uint64_t>{}(key.up);
-    const std::size_t h2 = std::hash<std::uint64_t>{}(key.down);
-    return h1 ^ (h2 + 0x9e3779b97f4a7c15ULL + (h1 << 6U) + (h1 >> 2U));
-  }
-};
-
 struct Relation {
   int parent = -1;
-  int shift = -1;
-  int sign = 1;
+  std::int8_t shift = -1;
+  std::int8_t sign = 1;
 };
+static_assert(sizeof(Relation) <= 8, "Relation must remain memory-compact for 4x4 sectors.");
 
 struct CompactHop {
   int parent = -1;
@@ -768,13 +761,60 @@ SectorBasis build_sector_basis(const Lattice& lattice, int n_up, int n_down, con
     }
   }
 
-  std::unordered_map<StateKey, Relation, StateKeyHash> relations;
-  relations.reserve(basis.full_dim);
+  // A node-based hash entry for every state is prohibitively expensive in the
+  // 4x4 half-filled sector (165,636,900 states).  Spin bitstrings live in a
+  // tiny 2^16 address space, so map each spin state to its combination rank and
+  // store orbit relations in one flat array indexed by the Cartesian rank.
+  // This also avoids hundreds of millions of hash lookups and node deletes.
+  const bool use_dense_spin_rank = lattice.sites <= 24;
+  std::vector<int> up_rank_dense;
+  std::vector<int> down_rank_dense;
+  std::unordered_map<std::uint64_t, int> up_rank_sparse;
+  std::unordered_map<std::uint64_t, int> down_rank_sparse;
+  if (use_dense_spin_rank) {
+    const std::size_t rank_size = std::size_t{1} << lattice.sites;
+    up_rank_dense.assign(rank_size, -1);
+    down_rank_dense.assign(rank_size, -1);
+    for (std::size_t index = 0; index < up_states.size(); ++index) {
+      up_rank_dense[static_cast<std::size_t>(up_states[index])] = static_cast<int>(index);
+    }
+    for (std::size_t index = 0; index < down_states.size(); ++index) {
+      down_rank_dense[static_cast<std::size_t>(down_states[index])] = static_cast<int>(index);
+    }
+  } else {
+    up_rank_sparse.reserve(up_states.size());
+    down_rank_sparse.reserve(down_states.size());
+    for (std::size_t index = 0; index < up_states.size(); ++index) {
+      up_rank_sparse.emplace(up_states[index], static_cast<int>(index));
+    }
+    for (std::size_t index = 0; index < down_states.size(); ++index) {
+      down_rank_sparse.emplace(down_states[index], static_cast<int>(index));
+    }
+  }
+  const auto spin_rank = [&](
+      std::uint64_t bits,
+      const std::vector<int>& dense,
+      const std::unordered_map<std::uint64_t, int>& sparse) {
+    if (use_dense_spin_rank) return dense[static_cast<std::size_t>(bits)];
+    const auto found = sparse.find(bits);
+    return found == sparse.end() ? -1 : found->second;
+  };
+  const auto relation_index = [&](const StateKey& state) {
+    const int up_rank = spin_rank(state.up, up_rank_dense, up_rank_sparse);
+    const int down_rank = spin_rank(state.down, down_rank_dense, down_rank_sparse);
+    if (up_rank < 0 || down_rank < 0) die("Translated state is outside the particle sector.");
+    return static_cast<std::size_t>(up_rank) * down_states.size() +
+        static_cast<std::size_t>(down_rank);
+  };
+  std::vector<Relation> relations(basis.full_dim, Relation{-1, -1, 1});
 
-  for (const auto up : up_states) {
-    for (const auto down : down_states) {
+  for (std::size_t up_index = 0; up_index < up_states.size(); ++up_index) {
+    const auto up = up_states[up_index];
+    for (std::size_t down_index = 0; down_index < down_states.size(); ++down_index) {
+      const auto down = down_states[down_index];
       const StateKey state{up, down};
-      if (relations.find(state) != relations.end()) {
+      const std::size_t state_index = up_index * down_states.size() + down_index;
+      if (relations[state_index].parent >= 0) {
         continue;
       }
 
@@ -783,7 +823,7 @@ SectorBasis build_sector_basis(const Lattice& lattice, int n_up, int n_down, con
       parent.representative = state;
       parent.diagonal = diagonal_energy(state, lattice, params.u, params.v);
 
-      relations.emplace(state, Relation{parent_index, 0, 1});
+      relations[state_index] = Relation{parent_index, 0, 1};
       int degeneracy = 0;
       for (int shift = 0; shift < static_cast<int>(translations.size()); ++shift) {
         int sign = 1;
@@ -797,7 +837,13 @@ SectorBasis build_sector_basis(const Lattice& lattice, int n_up, int n_down, con
         if (translated == state) {
           ++degeneracy;
         } else {
-          relations.emplace(translated, Relation{parent_index, shift, sign});
+          Relation& relation = relations[relation_index(translated)];
+          if (relation.parent < 0) {
+            relation = Relation{
+                parent_index,
+                static_cast<std::int8_t>(shift),
+                static_cast<std::int8_t>(sign)};
+          }
         }
       }
       parent.degeneracy = degeneracy;
@@ -845,7 +891,8 @@ SectorBasis build_sector_basis(const Lattice& lattice, int n_up, int n_down, con
             state.up ^ (std::uint64_t{1} << from) ^ (std::uint64_t{1} << to),
             state.down,
         };
-        const Relation rel = relations.at(target);
+        const Relation rel = relations[relation_index(target)];
+        if (rel.parent < 0) die("Missing up-spin hopping relation.");
         const int sign = rel.sign *
             (fermion_sign_hop(state.up, from, to) > 0.0 ? 1 : -1);
         basis.hops.push_back({
@@ -869,7 +916,8 @@ SectorBasis build_sector_basis(const Lattice& lattice, int n_up, int n_down, con
             state.up,
             state.down ^ (std::uint64_t{1} << from) ^ (std::uint64_t{1} << to),
         };
-        const Relation rel = relations.at(target);
+        const Relation rel = relations[relation_index(target)];
+        if (rel.parent < 0) die("Missing down-spin hopping relation.");
         const int sign = rel.sign *
             (fermion_sign_hop(state.down, from, to) > 0.0 ? 1 : -1);
         basis.hops.push_back({
