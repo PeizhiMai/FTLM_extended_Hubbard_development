@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_ROOT=$(cd "$(dirname "$0")/../../../.." && pwd)
+REPO_ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 REMOTE=${CADES_HOST:-cades}
 CAMPAIGN_ROOT=${CAMPAIGN_ROOT:-/lustre/or-scratch24/scratch/9pm/ftlm_codex/lx4_ly4_u7_campaign}
 TOOLCHAIN=${1:-intel}
