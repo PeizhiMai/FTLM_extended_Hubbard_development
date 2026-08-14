@@ -53,15 +53,26 @@ sample below 180 minutes, and peak RSS at most 210 GiB. RSS below 180 GiB keeps
 
 ## Production waves and extension
 
-Submit every incomplete twist concurrently:
+First complete and validate twist 005 as the one-twist pilot:
 
 ```bash
-/usr/bin/python3.11 source/campaigns/lx4_ly4_u7/cades/submit_wave.py --samples 16
+/usr/bin/python3.11 source/campaigns/lx4_ly4_u7/cades/submit_wave.py \
+  --samples 16 --twist-id 005
 /usr/bin/python3.11 source/campaigns/lx4_ly4_u7/cades/campaign_status.py --samples 16
+/usr/bin/python3.11 source/campaigns/lx4_ly4_u7/validate_thermo_csv.py \
+  runs/twist_005/twist_005_thermo_R016.csv \
+  --output runs/twist_005/validation_R016.json
 ```
 
 Each four-hour job stops internally after 210 minutes, appends every completed
-sample durably, and exits cleanly. Run the same command again for another wave.
+sample durably, and exits cleanly. Run the same pilot command again for another
+wave until twist 005 is complete. Only after that pilot and the resource gate
+pass, submit every remaining twist concurrently:
+
+```bash
+/usr/bin/python3.11 source/campaigns/lx4_ly4_u7/cades/submit_wave.py --samples 16
+```
+
 To extend later, change only the target:
 
 ```bash

@@ -60,6 +60,11 @@ def main():
     parser.add_argument("--campaign-root", type=Path, default=DEFAULT_ROOT)
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--account", default="cnms")
+    parser.add_argument(
+        "--twist-id",
+        action="append",
+        help="submit only this three-digit twist ID (repeatable); default is all twists",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--allow-ungated", action="store_true")
     args = parser.parse_args()
@@ -86,6 +91,13 @@ def main():
     active = []
     with manifest.open(newline="") as stream:
         twists = list(csv.DictReader(stream))
+    if args.twist_id:
+        requested = {value.zfill(3) for value in args.twist_id}
+        known = {row["twist_id"] for row in twists}
+        unknown = requested - known
+        if unknown:
+            raise SystemExit(f"unknown twist IDs: {sorted(unknown)}")
+        twists = [row for row in twists if row["twist_id"] in requested]
     for row in twists:
         twist_id = row["twist_id"]
         run_dir = root / f"runs/twist_{twist_id}"
