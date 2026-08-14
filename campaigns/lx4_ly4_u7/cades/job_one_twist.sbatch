@@ -196,7 +196,7 @@ fi
 
 if [[ -z ${ONLY_BLOCK_NUP:-} ]]; then
   REDUCE_R_VALUES=()
-  for reduce_r in 8 16 32 64 128 256; do
+  for reduce_r in 8 16 32 36 64 128 256; do
     if (( reduce_r > TARGET_R )); then
       continue
     fi

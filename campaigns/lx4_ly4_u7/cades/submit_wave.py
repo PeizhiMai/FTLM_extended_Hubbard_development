@@ -13,6 +13,7 @@ from pathlib import Path
 
 
 DEFAULT_ROOT = Path("/lustre/or-scratch24/scratch/9pm/ftlm_codex/lx4_ly4_u7_campaign")
+CADES_HIGH_MEM_CORES = 36
 
 
 def checkpoint_status(reducer: Path, checkpoint: Path, samples: int, lanczos_steps: int):
@@ -59,6 +60,14 @@ def active_job(job_name: str) -> str | None:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--samples", type=int, required=True, help="target total R")
+    parser.add_argument(
+        "--threads",
+        type=int,
+        help=(
+            "OpenMP worker count; defaults to the resource-gate recommendation. "
+            "The Slurm CPU request is capped at the 36 physical high-memory cores."
+        ),
+    )
     parser.add_argument("--lanczos-max-steps", type=int, default=80)
     parser.add_argument(
         "--lanczos-save-steps",
@@ -86,6 +95,8 @@ def main():
     args = parser.parse_args()
     if args.samples <= 0:
         raise SystemExit("--samples must be positive")
+    if args.threads is not None and args.threads <= 0:
+        raise SystemExit("--threads must be positive")
     if args.lanczos_max_steps <= 0:
         raise SystemExit("--lanczos-max-steps must be positive")
     if not args.checkpoint_series.replace("_", "").replace("-", "").isalnum():
@@ -130,6 +141,9 @@ def main():
         if not gate.get("passed"):
             raise SystemExit(f"resource gate did not pass: {gate_path}")
         threads = int(gate["production_threads"])
+    if args.threads is not None:
+        threads = args.threads
+    allocated_cpus = min(threads, CADES_HIGH_MEM_CORES)
 
     root.joinpath("logs").mkdir(parents=True, exist_ok=True)
     submitted = []
@@ -208,6 +222,7 @@ def main():
             )
         command = [
             "sbatch", "--parsable", "--account", args.account,
+            "--cpus-per-task", str(allocated_cpus),
             "--job-name", job_name,
             "--output", str(root / "logs/%x-%j.out"),
             "--error", str(root / "logs/%x-%j.err"),
@@ -223,11 +238,13 @@ def main():
             submitted.append((twist_id, job_id))
             print(
                 f"SUBMITTED twist={twist_id} job={job_id} target_R={args.samples} "
-                f"target_m={args.lanczos_max_steps} series={args.checkpoint_series} mem=250G"
+                f"target_m={args.lanczos_max_steps} series={args.checkpoint_series} "
+                f"threads={threads} allocated_cpus={allocated_cpus} mem=250G"
             )
     print(
         f"SUMMARY target_R={args.samples} target_m={args.lanczos_max_steps} "
-        f"series={args.checkpoint_series} complete={len(complete)} "
+        f"series={args.checkpoint_series} threads={threads} "
+        f"allocated_cpus={allocated_cpus} complete={len(complete)} "
         f"active={len(active)} submitted={len(submitted)} total={len(twists)}"
     )
 

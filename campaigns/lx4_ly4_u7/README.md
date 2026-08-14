@@ -6,10 +6,11 @@ It evaluates 10 symmetry-unique representatives of a 16-point twist grid:
 - `lx=ly=4`, `U=7`, `tx=ty=1`, `tp=V=0`
 - one recurrence to `m_max=300`, with reusable prefix spectra at
   `m=80,120,160,200,250,300`; exact momentum-block threshold `256`
-- initial target `R=16` (with retained `R=8` reductions)
+- production target `R=36` (with retained `R=8,16,32` reductions)
 - `beta=2.857142857142857,12.5` and 281 points on `mu=[-3,4]`
 - the representatives with `phiy >= phix` in `twists.csv`
-- one exclusive `high_mem` node per twist, 16 cores, **250 GiB**, four hours
+- one exclusive `high_mem` node per twist, 36 OpenMP workers, **250 GiB**,
+  four hours
 
 `twist_005` is `(phix,phiy)=(0.25,0.25)` and has permanent seed
 `5012360`. The largest block is `(Nup,Ndown,mx,my)=(8,8,0,0)`, with
@@ -62,14 +63,14 @@ First complete and validate twist 005 as the one-twist pilot:
 
 ```bash
 /usr/bin/python3.11 source/campaigns/lx4_ly4_u7/cades/submit_wave.py \
-  --samples 16 --twist-id 005 --checkpoint-series mext \
+  --samples 36 --threads 36 --twist-id 005 --checkpoint-series mext \
   --lanczos-max-steps 300 \
   --lanczos-save-steps 80,120,160,200,250,300
 /usr/bin/python3.11 source/campaigns/lx4_ly4_u7/cades/campaign_status.py \
-  --samples 16 --checkpoint-series mext --lanczos-steps 300
+  --samples 36 --checkpoint-series mext --lanczos-steps 300
 /usr/bin/python3.11 source/campaigns/lx4_ly4_u7/validate_thermo_csv.py \
-  runs/twist_005/twist_005_thermo_m300_R016.csv \
-  --output runs/twist_005/validation_m300_R016.json
+  runs/twist_005/twist_005_thermo_m300_R036.csv \
+  --output runs/twist_005/validation_m300_R036.json
 ```
 
 Each four-hour job stops internally after 210 minutes, appends every completed
@@ -82,7 +83,7 @@ pass, submit every remaining representative concurrently:
 
 ```bash
 /usr/bin/python3.11 source/campaigns/lx4_ly4_u7/cades/submit_wave.py \
-  --samples 16 --checkpoint-series mext --lanczos-max-steps 300 \
+  --samples 36 --threads 36 --checkpoint-series mext --lanczos-max-steps 300 \
   --lanczos-save-steps 80,120,160,200,250,300
 ```
 
@@ -90,12 +91,14 @@ To extend later, change only the target:
 
 ```bash
 /usr/bin/python3.11 source/campaigns/lx4_ly4_u7/cades/submit_wave.py \
-  --samples 32 --checkpoint-series mext --lanczos-max-steps 300 \
+  --samples 72 --threads 36 --checkpoint-series mext --lanczos-max-steps 300 \
   --lanczos-save-steps 80,120,160,200,250,300
 ```
 
-Sample IDs `0-15` are reused; only `16-31` are generated. The same checkpoint
-can still be reduced exactly at `R=8` or `R=16`.
+Sample IDs `0-35` are reused; only `36-71` are generated. With 36 OpenMP
+workers, the 72 samples are processed as two worker batches. Do not run two
+concurrent writers against one checkpoint. The same checkpoint can still be
+reduced exactly at `R=8`, `R=16`, `R=32`, or `R=36`.
 
 ## Reduction, averaging, and the x axis
 
@@ -114,7 +117,7 @@ Once all twist CSVs exist:
 ```bash
 for m in 80 120 160 200 250 300; do
   /usr/bin/python3.11 source/campaigns/lx4_ly4_u7/finalize_campaign.py \
-    --campaign-root "$CAMPAIGN_ROOT" --samples 16 \
+    --campaign-root "$CAMPAIGN_ROOT" --samples 36 \
     --checkpoint-series mext --lanczos-steps "$m" --skip-plot
 done
 ```
@@ -129,7 +132,7 @@ publication-style PNG/PDF with the requested environment:
 ```bash
 source ~/.venvs/myenv/bin/activate
 python scripts/plot_compressibility_vs_hole_doping.py \
-  twist_average_m300_R016.csv --output compressibility_vs_x_m300_R016.png
+  twist_average_m300_R036.csv --output compressibility_vs_x_m300_R036.png
 ```
 
 Because beta and mu are reducer inputs rather than checkpoint metadata,
