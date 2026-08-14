@@ -10,33 +10,69 @@ def logsumexp(values):
     return top + math.log(sum(math.exp(value - top) for value in values))
 
 
+def sample_spread(values):
+    if len(values) < 2:
+        return 0.0, 0.0
+    mean = sum(values) / len(values)
+    std = math.sqrt(sum((value - mean) ** 2 for value in values) / (len(values) - 1))
+    return std, std / math.sqrt(len(values))
+
+
+def detect_observable(fieldnames):
+    names = set(fieldnames or [])
+    has_sigma = "sigma" in names
+    has_sigma_dc = "sigma_dc" in names
+    if has_sigma and has_sigma_dc:
+        raise SystemExit("Input files cannot mix sigma and sigma_dc columns in one file")
+    if has_sigma:
+        return "sigma"
+    if has_sigma_dc:
+        return "sigma_dc"
+    return None
+
+
 def read_rows(paths, single_beta):
+    layout_seen = False
+    expected_observable = None
+    expected_has_omega = None
     for path in paths:
         with open(path, newline="") as f:
             reader = csv.DictReader(f)
-            has_beta = "beta" in (reader.fieldnames or [])
+            fieldnames = reader.fieldnames or []
+            has_beta = "beta" in fieldnames
+            has_omega = "omega" in fieldnames
+            observable = detect_observable(fieldnames)
+            if not layout_seen:
+                expected_observable = observable
+                expected_has_omega = has_omega
+                layout_seen = True
+            elif observable != expected_observable or has_omega != expected_has_omega:
+                raise SystemExit("All input files must have the same observable/omega column layout")
             if not has_beta and single_beta is None:
                 raise SystemExit(
                     f"{path} has no beta column; pass --single-beta for legacy single-beta files"
                 )
             for row in reader:
-                beta = float(row["beta"]) if has_beta else float(single_beta)
-                yield {
+                out = {
                     "path": path,
-                    "beta": beta,
+                    "beta": float(row["beta"]) if has_beta else float(single_beta),
                     "mu": float(row["mu"]),
+                    "omega": float(row["omega"]) if has_omega else None,
                     "n": float(row["n"]),
                     "charge_correlation": float(row["charge_correlation"]),
                     "compressibility": float(row["compressibility"]),
                     "log_partition": float(row["log_partition"])
                     if "log_partition" in row and row["log_partition"] != ""
                     else None,
+                    "observable_name": observable,
+                    "observable_value": float(row[observable]) if observable else None,
                 }
+                yield out
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Average or partition-sum FTLM n(mu) CSV files over twists."
+        description="Average or partition-sum FTLM CSV files over twists, including n(mu), optical sigma(omega), and DC sigma."
     )
     parser.add_argument("inputs", nargs="+", help="twist-resolved CSV files")
     parser.add_argument("--output", required=True, help="output CSV path")
@@ -44,7 +80,7 @@ def main():
         "--mode",
         choices=["observable-average", "partition-sum"],
         default="observable-average",
-        help="average observables equally, or combine twists by summing partition functions",
+        help="average observables equally, or combine twists by summing/weighting partition functions",
     )
     parser.add_argument("--sites", type=int, help="number of lattice sites; required for partition-sum")
     parser.add_argument(
@@ -52,35 +88,88 @@ def main():
         type=float,
         help="beta value for legacy single-beta files without a beta column",
     )
+    parser.add_argument(
+        "--expected-twists",
+        type=int,
+        help="refuse output unless every (beta,mu[,omega]) group has this many twists",
+    )
     args = parser.parse_args()
 
     if args.mode == "partition-sum" and (args.sites is None or args.sites <= 0):
         raise SystemExit("--sites is required and must be positive for --mode partition-sum")
 
     groups = defaultdict(list)
+    observable_name = None
+    has_omega = False
     for row in read_rows(args.inputs, args.single_beta):
-        groups[(row["beta"], row["mu"])].append(row)
+        observable_name = row["observable_name"] if observable_name is None else observable_name
+        has_omega = row["omega"] is not None
+        key = (row["beta"], row["mu"], row["omega"]) if has_omega else (row["beta"], row["mu"])
+        groups[key].append(row)
+
+    if args.expected_twists is not None and args.expected_twists <= 0:
+        raise SystemExit("--expected-twists must be positive")
+    for key, rows in groups.items():
+        paths = [row["path"] for row in rows]
+        if len(set(paths)) != len(paths):
+            raise SystemExit(f"duplicate input row for grid key {key}")
+        if args.expected_twists is not None and len(rows) != args.expected_twists:
+            raise SystemExit(
+                f"grid key {key} has {len(rows)} twists; expected {args.expected_twists}"
+            )
 
     with open(args.output, "w", newline="") as f:
-        fields = [
-            "beta",
-            "mu",
+        fields = ["beta", "mu"]
+        if has_omega:
+            fields.append("omega")
+        if observable_name:
+            fields.append(observable_name)
+        fields += [
             "n",
+            "x",
             "charge_correlation",
             "compressibility",
+            "n_std",
+            "n_sem",
+            "x_std",
+            "x_sem",
+            "compressibility_std",
+            "compressibility_sem",
             "twist_count",
             "mode",
             "log_partition",
         ]
+        if observable_name:
+            insertion = fields.index("twist_count")
+            fields[insertion:insertion] = [
+                f"{observable_name}_std",
+                f"{observable_name}_sem",
+            ]
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
 
-        for (beta, mu), rows in sorted(groups.items()):
+        for key, rows in sorted(groups.items()):
+            beta = key[0]
+            mu = key[1]
+            omega = key[2] if has_omega else None
             if args.mode == "observable-average":
                 count = len(rows)
                 n = sum(row["n"] for row in rows) / count
                 charge = sum(row["charge_correlation"] for row in rows) / count
                 kappa = sum(row["compressibility"] for row in rows) / count
+                obs = (
+                    sum(row["observable_value"] for row in rows) / count
+                    if observable_name
+                    else None
+                )
+                n_std, n_sem = sample_spread([row["n"] for row in rows])
+                kappa_std, kappa_sem = sample_spread(
+                    [row["compressibility"] for row in rows]
+                )
+                if observable_name:
+                    obs_std, obs_sem = sample_spread(
+                        [row["observable_value"] for row in rows]
+                    )
                 logs = [row["log_partition"] for row in rows if row["log_partition"] is not None]
                 log_partition = logsumexp(logs) - math.log(len(logs)) if logs else ""
             else:
@@ -91,28 +180,46 @@ def main():
                 weights = [math.exp(value - total_logz) for value in logz]
                 mean_n_total = 0.0
                 mean_n2_total = 0.0
+                obs = 0.0 if observable_name else None
                 for weight, row in zip(weights, rows):
                     particles = row["n"] * args.sites
                     particles2 = row["charge_correlation"] * args.sites + particles * particles
                     mean_n_total += weight * particles
                     mean_n2_total += weight * particles2
+                    if observable_name:
+                        obs += weight * row["observable_value"]
                 n = mean_n_total / args.sites
                 charge = max(0.0, (mean_n2_total - mean_n_total * mean_n_total) / args.sites)
                 kappa = beta * charge
                 log_partition = total_logz
+                n_std = n_sem = kappa_std = kappa_sem = ""
+                if observable_name:
+                    obs_std = obs_sem = ""
 
-            writer.writerow(
-                {
-                    "beta": beta,
-                    "mu": mu,
-                    "n": n,
-                    "charge_correlation": charge,
-                    "compressibility": kappa,
-                    "twist_count": len(rows),
-                    "mode": args.mode,
-                    "log_partition": log_partition,
-                }
-            )
+            out = {
+                "beta": beta,
+                "mu": mu,
+                "n": n,
+                "x": 1.0 - n,
+                "charge_correlation": charge,
+                "compressibility": kappa,
+                "n_std": n_std,
+                "n_sem": n_sem,
+                "x_std": n_std,
+                "x_sem": n_sem,
+                "compressibility_std": kappa_std,
+                "compressibility_sem": kappa_sem,
+                "twist_count": len(rows),
+                "mode": args.mode,
+                "log_partition": log_partition,
+            }
+            if has_omega:
+                out["omega"] = omega
+            if observable_name:
+                out[observable_name] = obs
+                out[f"{observable_name}_std"] = obs_std
+                out[f"{observable_name}_sem"] = obs_sem
+            writer.writerow(out)
 
 
 if __name__ == "__main__":

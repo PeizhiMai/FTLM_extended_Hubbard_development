@@ -5,7 +5,7 @@ This is a fresh C++ implementation of the FTLM thermodynamic core, built by lear
 - `reference_ftlm_hub_cond/fltm_hub_cond/hubTri2Dcond_omp.f`
 - `reference_ftlm_hub_cond/fltm_hub_cond/cond_spect_omp.f`
 
-The conductivity-specific parts from the Fortran code were intentionally dropped. The target here is the grand-canonical density curve `n` versus chemical potential `mu`, plus the charge-fluctuation compressibility, at fixed inverse temperature `beta` for an extended Hubbard model on a periodic rectangular lattice.
+The first target was the grand-canonical density curve `n` versus chemical potential `mu`, plus the charge-fluctuation compressibility. The code now also includes exact-ED and two-Lanczos FTLM machinery for regular optical/DC conductivity.
 
 ## Model
 
@@ -23,9 +23,11 @@ The code currently includes:
 To avoid the RAM-heavy pattern from older local code, the implementation:
 
 - never builds the full Hamiltonian matrix
-- stores only spin-sector bitstring lists, not full many-body objects
-- applies `H` on the fly during Lanczos
+- stores the active momentum block as sparse CSR and uses a compact 12-byte
+  sector hopping record
+- drops zero-amplitude hopping directions (notably all `t'=0` diagonals)
 - keeps only three Lanczos vectors in memory
+- loads checkpoint spectra in index-only mode during generation
 
 ## Build
 
@@ -69,7 +71,7 @@ comma-separated beta list:
   --lx 4 --ly 4 \
   --u 7.0 \
   --beta-list 2.857142857142857,12.5 \
-  --samples 128 \
+  --samples 16 \
   --lanczos-steps 80 \
   --mu-min -3 --mu-max 4 --mu-count 281 \
   --output n_vs_mu_multi_beta.csv
@@ -80,7 +82,9 @@ leading `beta` column. With a single `--beta`, the legacy output format is
 unchanged.
 
 The default Lanczos depth is `80` steps per random vector.
-The default FTLM sample count is `5`.
+The default FTLM sample count is `5`. With an extensible v2 checkpoint,
+`--samples R` means the target total number of permanent sample IDs per
+stochastic momentum block.
 By default, the FTLM executable diagonalizes small momentum blocks exactly when
 their dimension is at most `256`; change this with `--exact-block-threshold N`,
 or set it to `0` to force stochastic FTLM on every non-empty block.
@@ -111,8 +115,14 @@ combine their CSV files:
 python3 scripts/average_twist_outputs.py \
   twist_*.csv \
   --mode observable-average \
+  --expected-twists 16 \
   --output twist_average.csv
 ```
+
+Rows are combined at fixed `(beta,mu)` and the output includes
+`x = 1 - mean(n)`, twist standard deviations, and standard errors. Thus twists
+that give different individual densities at the same `mu` do not require
+interpolation before the thermodynamic average.
 
 `observable-average` is the usual equal-weight average of measured observables
 over twists. If you want to combine the twists by summing their partition
@@ -133,18 +143,49 @@ For checkpointing long cluster runs, pass a checkpoint path:
   --lx 4 --ly 4 \
   --u 7 \
   --beta-list 2.857142857142857,12.5 \
-  --samples 128 \
+  --samples 16 \
   --lanczos-steps 80 \
   --checkpoint twist_000.ftlmcp \
+  --max-runtime-minutes 210 \
+  --progress-jsonl twist_000.progress.jsonl \
+  --progress-state twist_000.state.json \
   --output twist_000.csv
 ```
 
-The checkpoint stores compact per-block spectra after each completed
-`(N_up,N_down,k)` block. Rerunning the same command with the same checkpoint
-skips completed blocks and resumes from the next missing block. The companion
-`*.meta` file records the model, twist, sampling, seed, and exact-block
-threshold; a mismatched command fails early instead of mixing incompatible
-spectra.
+New thermodynamic checkpoints use append-only format v2. Every completed
+`(N_up,N_down,k,sample_id)` record is checksummed and fsynced independently, and
+stores raw first-vector overlaps rather than weights already divided by `R`.
+The RNG and seed derivation are versioned in `*.meta`. Rerunning at the same
+target resumes only missing IDs; increasing `--samples 16` to `--samples 32`
+generates only IDs `16-31`. Target `R` is deliberately not immutable metadata,
+while lattice/model/twist/seed/Lanczos depth/exact threshold/RNG version are.
+
+The process responds to `SIGUSR1`/`SIGTERM` by starting no more samples and
+finishing durable active samples. Progress is printed after every checkpoint and
+at the requested heartbeat interval. A partially written final record is
+truncated to its last verified boundary on restart.
+
+Reduce or inspect a checkpoint without reconstructing Hilbert-space bases:
+
+```bash
+./build/ftlm_reduce_checkpoint \
+  --checkpoint twist_000.ftlmcp --samples 16 \
+  --beta-list 2.857142857142857,12.5 \
+  --mu-min -3 --mu-max 4 --mu-count 281 \
+  --output twist_000_R16.csv
+
+./build/ftlm_reduce_checkpoint \
+  --checkpoint twist_000.ftlmcp --samples 32 --status
+```
+
+Status mode reports every missing sample ID and the next unit of work. Reduction
+at `R=32` is refused until every stochastic block has IDs `0-31`; lower-R
+reductions remain byte-reproducible after extension. Legacy v1 checkpoints are
+still readable at their original `R`, but are read-only and cannot be extended.
+
+The complete 4x4 CADES workflow, fixed twist manifest, resource gate, wave
+submission, validation, and final plotting are documented in
+`campaigns/lx4_ly4_u7/README.md`.
 
 ## Exact Diagonalization
 
@@ -160,7 +201,105 @@ A separate exact-diagonalization executable is also available:
 
 This ED path reuses the same fixed-particle sectors and momentum-block construction as the FTLM code, but it diagonalizes each active `(N_up, N_down, k)` block exactly instead of using Lanczos sampling.
 
+An exact optical/DC conductivity executable is available for small clusters and
+benchmarking:
+
+```bash
+./build/ftlm_ed_conductivity \
+  --lx 3 --ly 2 \
+  --u 7 \
+  --phix 0.2 --phiy 0.3 \
+  --beta-list 2.857142857142857,12.5 \
+  --mu-min -3 --mu-max 4 --mu-count 281 \
+  --omega-min 0 --omega-max 12 --omega-count 1201 \
+  --eta 0.05 \
+  --conductivity-direction x \
+  --output optical_conductivity.csv \
+  --dc-output dc_conductivity.csv
+```
+
+The optical CSV contains:
+
+- `beta`, `mu`, `omega`
+- `sigma`, the Lorentzian-broadened regular optical conductivity
+- `n`, `charge_correlation`, `compressibility`, and `log_partition`
+
+The DC CSV reports `sigma_dc = sigma(omega=0)` using the same broadening
+parameter `eta`. This implementation evaluates the Kubo formula exactly inside
+each momentum block and is therefore intended for clusters/blocks that can be
+fully diagonalized. Use `--max-conductivity-block-dim N` to guard memory.
+
 The twist parameters `--phix` and `--phiy` are homogeneous twists in units of `2*pi`. The default is `phix=phiy=1`, which is gauge-equivalent to no twist.
+
+
+## Two-Lanczos FTLM Conductivity
+
+For larger clusters, use the two-Lanczos current-current executable:
+
+```bash
+./build/ftlm_conductivity \
+  --lx 4 --ly 4 \
+  --u 7 \
+  --phix 0.2 --phiy 0.3 \
+  --beta-list 2.857142857142857,12.5 \
+  --mu-min -3 --mu-max 4 --mu-count 281 \
+  --samples 128 \
+  --lanczos-steps 80 \
+  --omega-min 0 --omega-max 12 --omega-count 1201 \
+  --eta 0.05 \
+  --conductivity-direction x \
+  --conductivity-checkpoint twist_000.condcp \
+  --conductivity-memory-mode hybrid \
+  --conductivity-basis-memory-mb 512 \
+  --max-runtime-minutes 230 \
+  --output optical_conductivity.csv \
+  --dc-output dc_conductivity.csv
+```
+
+The executable uses exact ED conductivity for momentum blocks with
+`basis_dim <= --exact-block-threshold` and two Lanczos runs per random vector for
+larger blocks. In the first Lanczos run the starting vector is the random FTLM
+state; in the second Lanczos run the starting vector is the normalized current
+state `J|r>`. The compact per-sample records are appended to
+`--conductivity-checkpoint`, so cluster jobs can be restarted without repeating
+completed `(N_up,N_down,k,sample)` records.
+
+The default memory mode is `hybrid`: if storing both Lanczos bases is estimated
+to fit under `--conductivity-basis-memory-mb`, the code stores them for speed;
+otherwise it recomputes basis vectors while forming the projected current matrix.
+Use `--conductivity-memory-mode store-bases` or `recompute` to force either path.
+
+If `--max-runtime-minutes` is set, the run exits cleanly after the next completed
+sample record and can be resumed by rerunning the same command. Final optical and
+DC CSVs are written only once all requested samples are present. The checkpoint
+metadata validates generation-critical parameters such as lattice, model, twist,
+direction, sample count, Lanczos depth, seed, and exact-block threshold; the raw
+records remain reusable for different beta, mu, omega, or eta postprocessing
+grids.
+
+The optical CSV contains:
+
+- `beta`, `mu`, `omega`
+- `sigma`, the Lorentzian-broadened regular optical conductivity
+- `n`, `charge_correlation`, `compressibility`, and `log_partition`
+
+The DC CSV contains the same thermodynamic columns and `sigma_dc = sigma(0)`.
+This first implementation reports only the regular broadened conductivity;
+diamagnetic tau/Drude-weight diagnostics are intentionally left for a later
+extension.
+
+Twist-resolved optical or DC conductivity CSVs can be combined with the same
+averaging script used for thermodynamics. For optical data, rows are grouped by
+`(beta, mu, omega)`; for DC data they are grouped by `(beta, mu)`:
+
+```bash
+python3 scripts/average_twist_outputs.py \
+  twist_*_optical.csv \
+  --mode observable-average \
+  --output optical_twist_average.csv
+```
+
+For partition-weighted conductivity averages, pass `--mode partition-sum --sites N`.
 
 ## 4x2 FTLM vs ED Comparison
 
