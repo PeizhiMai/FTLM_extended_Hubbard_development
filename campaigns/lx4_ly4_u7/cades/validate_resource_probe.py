@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3.11
 """Apply the 4x4 memory/runtime gate to twist 005's largest block."""
 
 from __future__ import annotations

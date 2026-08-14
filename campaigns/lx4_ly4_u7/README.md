@@ -43,7 +43,7 @@ CAMPAIGN_ROOT=/lustre/or-scratch24/scratch/9pm/ftlm_codex/lx4_ly4_u7_campaign \
 After the job finishes, apply the gate:
 
 ```bash
-python3 source/campaigns/lx4_ly4_u7/cades/validate_resource_probe.py
+/usr/bin/python3.11 source/campaigns/lx4_ly4_u7/cades/validate_resource_probe.py
 ```
 
 The validator requires all sample IDs `0-15`, dimension `10,353,252`, every
@@ -56,8 +56,8 @@ sample below 180 minutes, and peak RSS at most 210 GiB. RSS below 180 GiB keeps
 Submit every incomplete twist concurrently:
 
 ```bash
-python3 source/campaigns/lx4_ly4_u7/cades/submit_wave.py --samples 16
-python3 source/campaigns/lx4_ly4_u7/cades/campaign_status.py --samples 16
+/usr/bin/python3.11 source/campaigns/lx4_ly4_u7/cades/submit_wave.py --samples 16
+/usr/bin/python3.11 source/campaigns/lx4_ly4_u7/cades/campaign_status.py --samples 16
 ```
 
 Each four-hour job stops internally after 210 minutes, appends every completed
@@ -65,7 +65,7 @@ sample durably, and exits cleanly. Run the same command again for another wave.
 To extend later, change only the target:
 
 ```bash
-python3 source/campaigns/lx4_ly4_u7/cades/submit_wave.py --samples 32
+/usr/bin/python3.11 source/campaigns/lx4_ly4_u7/cades/submit_wave.py --samples 32
 ```
 
 Sample IDs `0-15` are reused; only `16-31` are generated. The same checkpoint

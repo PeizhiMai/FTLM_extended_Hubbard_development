@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3.11
 """Gate the v2 3x3 FTLM rerun against the existing exact benchmark."""
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3.11
 """Print achieved-R/checkpoint/Slurm status for all sixteen twists."""
 
 from __future__ import annotations

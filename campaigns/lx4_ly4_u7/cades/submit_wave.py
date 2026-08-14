@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3.11
 """Submit one independent CADES high-memory job for each incomplete twist."""
 
 from __future__ import annotations
