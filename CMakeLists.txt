@@ -85,6 +85,19 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU|IntelLLVM")
   target_compile_options(ftlm_reduce_checkpoint PRIVATE -O3 -Wall -Wextra -Wpedantic)
 endif()
 
+# CADES' IntelLLVM module uses the system libstdc++ where C++17 filesystem is
+# still packaged as a separate compatibility archive.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM" AND UNIX AND NOT APPLE)
+  foreach(target_name IN ITEMS
+      ftlm_n_vs_mu
+      ftlm_ed_n_vs_mu
+      ftlm_ed_conductivity
+      ftlm_conductivity
+      ftlm_reduce_checkpoint)
+    target_link_libraries(${target_name} PRIVATE stdc++fs)
+  endforeach()
+endif()
+
 if(BUILD_TESTING)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
   add_test(
