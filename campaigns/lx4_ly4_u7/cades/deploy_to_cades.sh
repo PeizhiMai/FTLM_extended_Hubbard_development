@@ -7,8 +7,8 @@ CAMPAIGN_ROOT=${CAMPAIGN_ROOT:-/lustre/or-scratch24/scratch/9pm/ftlm_codex/lx4_l
 TOOLCHAIN=${1:-intel}
 
 cd "$REPO_ROOT"
-if [[ -n $(git status --porcelain) ]]; then
-  echo "Refusing to deploy a dirty tree; commit the campaign implementation first." >&2
+if [[ -n $(git status --porcelain --untracked-files=no) ]]; then
+  echo "Refusing to deploy tracked modifications; commit the campaign implementation first." >&2
   exit 2
 fi
 COMMIT=$(git rev-parse HEAD)
