@@ -92,12 +92,22 @@ or averaging at mismatched thermodynamic control parameters.
 Once all twist CSVs exist:
 
 ```bash
-python3 source/campaigns/lx4_ly4_u7/finalize_campaign.py \
-  --campaign-root "$CAMPAIGN_ROOT" --samples 16
+/usr/bin/python3.11 source/campaigns/lx4_ly4_u7/finalize_campaign.py \
+  --campaign-root "$CAMPAIGN_ROOT" --samples 16 --skip-plot
 ```
 
 The finalizer requires two betas, 281 rows per beta, monotone density,
 nonnegative compressibility, and complete `x=[0,0.35]` coverage. It writes the
-equal-observable twist average and a publication-style PNG/PDF. Because beta and
-mu are reducer inputs rather than checkpoint metadata, retained checkpoints can
-produce new temperature or chemical-potential grids without more Lanczos work.
+equal-observable twist average. CADES' system Python does not include
+Matplotlib, so copy that average to the local workspace and make the
+publication-style PNG/PDF with the requested environment:
+
+```bash
+source ~/.venvs/myenv/bin/activate
+python scripts/plot_compressibility_vs_hole_doping.py \
+  twist_average_R016.csv --output compressibility_vs_x_R016.png
+```
+
+Because beta and mu are reducer inputs rather than checkpoint metadata,
+retained checkpoints can produce new temperature or chemical-potential grids
+without more Lanczos work.
