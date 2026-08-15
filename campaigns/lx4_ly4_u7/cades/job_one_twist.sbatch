@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --account=cnms
-#SBATCH --partition=high_mem
-#SBATCH --qos=cnms-high_mem
+#SBATCH --partition=burst
+#SBATCH --qos=default
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16

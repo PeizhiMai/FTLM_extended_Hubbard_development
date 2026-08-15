@@ -13,8 +13,9 @@ spacing `Delta kx = Delta ky = pi/40`:
 - physical twists in `0 <= kx <= ky <= pi/4`, listed in `twists.csv`
 - periodic D4 multiplicities 1, 2, 4, or 8, giving 400 effective rBZ points
   from 66 jobs
-- one exclusive `high_mem` node per twist, 36 OpenMP workers, **250 GiB**,
-  four hours
+- one exclusive `burst` node per twist, 36 OpenMP workers, **250 GiB**,
+  four hours, using the `default` QOS with no Slurm dependencies or
+  campaign-side concurrency throttle
 
 The executable's `phix` and `phiy` are boundary-flux fractions, not physical
 momenta.  For this 4x4 cluster,

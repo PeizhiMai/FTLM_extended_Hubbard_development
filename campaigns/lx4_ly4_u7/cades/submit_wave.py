@@ -14,7 +14,9 @@ from pathlib import Path
 
 
 DEFAULT_ROOT = Path("/lustre/or-scratch24/scratch/9pm/ftlm_codex/lx4_ly4_u7_campaign")
-CADES_HIGH_MEM_CORES = 36
+CADES_PRODUCTION_CORES = 36
+DEFAULT_PARTITION = "burst"
+DEFAULT_QOS = "default"
 
 
 def validate_rbz_manifest(rows, metadata):
@@ -137,6 +139,16 @@ def main():
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--account", default="cnms")
     parser.add_argument(
+        "--partition",
+        default=DEFAULT_PARTITION,
+        help="Slurm partition; production defaults to burst",
+    )
+    parser.add_argument(
+        "--qos",
+        default=DEFAULT_QOS,
+        help="Slurm QOS; burst production uses default",
+    )
+    parser.add_argument(
         "--twist-id",
         action="append",
         help="submit only this three-digit twist ID (repeatable); default is all twists",
@@ -194,7 +206,7 @@ def main():
         threads = int(gate["production_threads"])
     if args.threads is not None:
         threads = args.threads
-    allocated_cpus = min(threads, CADES_HIGH_MEM_CORES)
+    allocated_cpus = min(threads, CADES_PRODUCTION_CORES)
 
     root.joinpath("logs").mkdir(parents=True, exist_ok=True)
     submitted = []
@@ -286,6 +298,7 @@ def main():
             )
         command = [
             "sbatch", "--parsable", "--account", args.account,
+            "--partition", args.partition, "--qos", args.qos,
             "--cpus-per-task", str(allocated_cpus),
             "--job-name", job_name,
             "--output", str(root / "logs/%x-%j.out"),
@@ -303,13 +316,15 @@ def main():
             print(
                 f"SUBMITTED twist={twist_id} job={job_id} target_R={args.samples} "
                 f"target_m={args.lanczos_max_steps} series={args.checkpoint_series} "
-                f"threads={threads} allocated_cpus={allocated_cpus} mem=250G"
+                f"threads={threads} allocated_cpus={allocated_cpus} mem=250G "
+                f"partition={args.partition} qos={args.qos}"
             )
     print(
         f"SUMMARY target_R={args.samples} target_m={args.lanczos_max_steps} "
         f"series={args.checkpoint_series} threads={threads} "
         f"allocated_cpus={allocated_cpus} complete={len(complete)} "
         f"active={len(active)} submitted={len(submitted)} total={len(twists)} "
+        f"partition={args.partition} qos={args.qos} "
         f"quadrature={metadata['tag']} selected_weight={selected_weight} "
         f"full_effective_twists={effective_twists}"
     )
