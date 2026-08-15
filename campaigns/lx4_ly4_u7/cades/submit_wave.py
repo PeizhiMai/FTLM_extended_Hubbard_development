@@ -18,26 +18,45 @@ CADES_HIGH_MEM_CORES = 36
 
 
 def validate_rbz_manifest(rows, metadata):
-    if metadata.get("tag") != "rbz8_midpoint":
+    if metadata.get("tag") != "rbz20_gamma_dk_pi40":
         raise RuntimeError(f"unexpected quadrature tag: {metadata.get('tag')}")
     if len(rows) != int(metadata["representatives"]):
         raise RuntimeError("manifest representative count disagrees with metadata")
+    grid_size = int(metadata["grid_nx"])
+    if grid_size != 20 or int(metadata["grid_ny"]) != grid_size:
+        raise RuntimeError("expected a 20x20 reduced-BZ grid")
+    ids = set()
     weight = 0
     for row in rows:
+        twist_id = row["twist_id"]
+        if twist_id in ids:
+            raise RuntimeError(f"duplicate twist ID: {twist_id}")
+        ids.add(twist_id)
+        ix = int(row["grid_ix"])
+        iy = int(row["grid_iy"])
         phix = float(row["phix"])
         phiy = float(row["phiy"])
-        if not (0.0 < phix <= phiy < 0.5):
+        if not (0 <= ix <= iy <= grid_size // 2):
             raise RuntimeError(
-                f"twist {row['twist_id']} is outside 0 < kx <= ky < pi/4"
+                f"twist {twist_id} is outside 0 <= kx <= ky <= pi/4"
             )
-        if not math.isclose(float(row["kx_over_pi"]), phix / 2.0, abs_tol=1e-12):
-            raise RuntimeError(f"twist {row['twist_id']} has inconsistent kx/phix")
-        if not math.isclose(float(row["ky_over_pi"]), phiy / 2.0, abs_tol=1e-12):
-            raise RuntimeError(f"twist {row['twist_id']} has inconsistent ky/phiy")
-        expected = 4 if math.isclose(phix, phiy) else 8
+        if not math.isclose(phix, ix / grid_size, abs_tol=1e-12):
+            raise RuntimeError(f"twist {twist_id} has inconsistent phix/grid_ix")
+        if not math.isclose(phiy, iy / grid_size, abs_tol=1e-12):
+            raise RuntimeError(f"twist {twist_id} has inconsistent phiy/grid_iy")
+        if not math.isclose(float(row["kx_over_pi"]), ix / 40.0, abs_tol=1e-12):
+            raise RuntimeError(f"twist {twist_id} has inconsistent kx/grid_ix")
+        if not math.isclose(float(row["ky_over_pi"]), iy / 40.0, abs_tol=1e-12):
+            raise RuntimeError(f"twist {twist_id} has inconsistent ky/grid_iy")
+        orbit = set()
+        for sx in (-1, 1):
+            for sy in (-1, 1):
+                orbit.add(((sx * ix) % grid_size, (sy * iy) % grid_size))
+                orbit.add(((sx * iy) % grid_size, (sy * ix) % grid_size))
+        expected = len(orbit)
         if int(row["multiplicity"]) != expected:
             raise RuntimeError(
-                f"twist {row['twist_id']} has multiplicity {row['multiplicity']}, "
+                f"twist {twist_id} has multiplicity {row['multiplicity']}, "
                 f"expected {expected}"
             )
         weight += expected

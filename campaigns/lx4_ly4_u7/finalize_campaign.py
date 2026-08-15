@@ -37,6 +37,9 @@ def validate_manifest(twists, quadrature):
     ly = int(quadrature["cluster_ly"])
     if lx != 4 or ly != 4:
         raise RuntimeError(f"expected a 4x4 quadrature, found {lx}x{ly}")
+    grid_size = int(quadrature["grid_nx"])
+    if grid_size != 20 or int(quadrature["grid_ny"]) != grid_size:
+        raise RuntimeError("expected a 20x20 reduced-BZ grid")
     if len(twists) != int(quadrature["representatives"]):
         raise RuntimeError("manifest representative count disagrees with metadata")
     ids = set()
@@ -46,19 +49,30 @@ def validate_manifest(twists, quadrature):
         if twist_id in ids:
             raise RuntimeError(f"duplicate twist ID: {twist_id}")
         ids.add(twist_id)
+        ix = int(row["grid_ix"])
+        iy = int(row["grid_iy"])
         phix = float(row["phix"])
         phiy = float(row["phiy"])
         kx_over_pi = float(row["kx_over_pi"])
         ky_over_pi = float(row["ky_over_pi"])
-        if not (0.0 < phix <= phiy < 0.5):
+        if not (0 <= ix <= iy <= grid_size // 2):
             raise RuntimeError(
-                f"twist {twist_id} lies outside 0 < kx <= ky < pi/4: {row}"
+                f"twist {twist_id} lies outside 0 <= kx <= ky <= pi/4: {row}"
             )
+        if not math.isclose(phix, ix / grid_size, abs_tol=1e-12):
+            raise RuntimeError(f"twist {twist_id} has inconsistent phix/grid_ix")
+        if not math.isclose(phiy, iy / grid_size, abs_tol=1e-12):
+            raise RuntimeError(f"twist {twist_id} has inconsistent phiy/grid_iy")
         if not math.isclose(kx_over_pi, 2.0 * phix / lx, abs_tol=1e-12):
             raise RuntimeError(f"twist {twist_id} has inconsistent kx/phix")
         if not math.isclose(ky_over_pi, 2.0 * phiy / ly, abs_tol=1e-12):
             raise RuntimeError(f"twist {twist_id} has inconsistent ky/phiy")
-        expected_multiplicity = 4 if math.isclose(phix, phiy) else 8
+        orbit = set()
+        for sx in (-1, 1):
+            for sy in (-1, 1):
+                orbit.add(((sx * ix) % grid_size, (sy * iy) % grid_size))
+                orbit.add(((sx * iy) % grid_size, (sy * ix) % grid_size))
+        expected_multiplicity = len(orbit)
         multiplicity = int(row["multiplicity"])
         if multiplicity != expected_multiplicity:
             raise RuntimeError(

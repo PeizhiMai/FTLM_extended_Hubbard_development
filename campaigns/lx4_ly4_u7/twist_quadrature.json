@@ -1,16 +1,31 @@
 {
   "cluster_lx": 4,
   "cluster_ly": 4,
-  "description": "8x8 midpoint quadrature of the 4x4-cluster reduced Brillouin zone",
-  "effective_twists": 64,
+  "description": "20x20 Gamma-centered quadrature with spacing pi/40 in the 4x4-cluster reduced Brillouin zone",
+  "effective_twists": 400,
   "full_domain": "-pi/4 <= kx,ky < pi/4",
-  "grid_nx": 8,
-  "grid_ny": 8,
+  "gamma_centered": true,
+  "grid_nx": 20,
+  "grid_ny": 20,
+  "includes_zero": true,
   "input_convention": "kx=2*pi*phix/lx; ky=2*pi*phiy/ly",
-  "midpoint_grid": true,
-  "representative_domain": "0 < kx <= ky < pi/4",
-  "representatives": 10,
+  "periodic_boundary_identification": "+pi/4 == -pi/4 modulo pi/2",
+  "preserved_twist_ids": [
+    {
+      "grid_ix": 0,
+      "grid_iy": 0,
+      "twist_id": "000"
+    },
+    {
+      "grid_ix": 5,
+      "grid_iy": 5,
+      "twist_id": "005"
+    }
+  ],
+  "representative_domain": "0 <= kx <= ky <= pi/4; +pi/4 represents the periodic -pi/4 boundary",
+  "representatives": 66,
   "schema_version": 1,
+  "spacing_over_pi": 0.025,
   "symmetry": "D4: independent sign reflections and x-y exchange",
-  "tag": "rbz8_midpoint"
+  "tag": "rbz20_gamma_dk_pi40"
 }

@@ -56,12 +56,15 @@ def main():
             "negx": (-0.1875, 0.3125),
             "negy": (0.1875, -0.3125),
             "swap": (0.3125, 0.1875),
+            "boundary_pos": (0.5, 0.15),
+            "boundary_neg": (-0.5, 0.15),
         }
         for name, (phix, phiy) in cases.items():
             run(args.ed, root / f"{name}.csv", phix, phiy)
         for name in ("negx", "negy", "swap"):
             compare(root / "base.csv", root / f"{name}.csv")
-    print("PASS ED twist symmetry: kx signs, ky signs, and kx<->ky")
+        compare(root / "boundary_pos.csv", root / "boundary_neg.csv")
+    print("PASS ED twist symmetry: signs, kx<->ky, and periodic pi/4 boundary")
 
 
 if __name__ == "__main__":
