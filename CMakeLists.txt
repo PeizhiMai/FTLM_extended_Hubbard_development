@@ -117,4 +117,20 @@ if(BUILD_TESTING)
       --reducer "$<TARGET_FILE:ftlm_reduce_checkpoint>"
   )
   set_tests_properties(lanczos_prefix_checkpoint PROPERTIES TIMEOUT 180)
+
+  add_test(
+    NAME rbz_twist_manifest
+    COMMAND "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_rbz_twist_manifest.py"
+      --campaign-dir "${CMAKE_CURRENT_SOURCE_DIR}/campaigns/lx4_ly4_u7"
+  )
+  set_tests_properties(rbz_twist_manifest PROPERTIES TIMEOUT 10)
+
+  add_test(
+    NAME twist_d4_ed
+    COMMAND "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_twist_d4_ed.py"
+      --ed "$<TARGET_FILE:ftlm_ed_n_vs_mu>"
+  )
+  set_tests_properties(twist_d4_ed PROPERTIES TIMEOUT 30)
 endif()

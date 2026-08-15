@@ -72,9 +72,17 @@ def main():
     with manifest.open(newline="") as stream:
         rows = list(csv.DictReader(stream))
 
-    print("twist target_R target_m min_R progress   next_missing                         slurm")
+    print(
+        "twist  kx/pi   ky/pi  w target_R target_m min_R progress   "
+        "next_missing                         slurm"
+    )
     for row in rows:
         twist_id = row["twist_id"]
+        momentum = (
+            f"{float(row.get('kx_over_pi', 'nan')):>6.4f} "
+            f"{float(row.get('ky_over_pi', 'nan')):>6.4f} "
+            f"{int(row.get('multiplicity', '1')):>2}"
+        )
         suffix = "" if args.checkpoint_series == "legacy" else f"_{args.checkpoint_series}"
         checkpoint = root / f"runs/twist_{twist_id}/twist_{twist_id}{suffix}.ftlmcp"
         status, diagnostic = inspect(
@@ -88,13 +96,13 @@ def main():
         slurm = slurm_state(job_name)
         if status is None:
             print(
-                f"{twist_id:>5} {args.samples:>8} {args.lanczos_steps:>8} "
+                f"{twist_id:>5} {momentum} {args.samples:>8} {args.lanczos_steps:>8} "
                 f"{0:>5} {'0.0%':>8}   {diagnostic[:35]:<35} {slurm}"
             )
             continue
         progress = f"{100.0 * status['weighted_progress']:.1f}%"
         print(
-            f"{twist_id:>5} {args.samples:>8} {args.lanczos_steps:>8} "
+            f"{twist_id:>5} {momentum} {args.samples:>8} {args.lanczos_steps:>8} "
             f"{status['minimum_complete_R']:>5} "
             f"{progress:>8}   {next_text(status['next_missing']):<35} {slurm}"
         )

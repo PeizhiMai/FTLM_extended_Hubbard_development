@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import shutil
 import subprocess
 import tempfile
@@ -14,6 +15,37 @@ from pathlib import Path
 
 DEFAULT_ROOT = Path("/lustre/or-scratch24/scratch/9pm/ftlm_codex/lx4_ly4_u7_campaign")
 CADES_HIGH_MEM_CORES = 36
+
+
+def validate_rbz_manifest(rows, metadata):
+    if metadata.get("tag") != "rbz8_midpoint":
+        raise RuntimeError(f"unexpected quadrature tag: {metadata.get('tag')}")
+    if len(rows) != int(metadata["representatives"]):
+        raise RuntimeError("manifest representative count disagrees with metadata")
+    weight = 0
+    for row in rows:
+        phix = float(row["phix"])
+        phiy = float(row["phiy"])
+        if not (0.0 < phix <= phiy < 0.5):
+            raise RuntimeError(
+                f"twist {row['twist_id']} is outside 0 < kx <= ky < pi/4"
+            )
+        if not math.isclose(float(row["kx_over_pi"]), phix / 2.0, abs_tol=1e-12):
+            raise RuntimeError(f"twist {row['twist_id']} has inconsistent kx/phix")
+        if not math.isclose(float(row["ky_over_pi"]), phiy / 2.0, abs_tol=1e-12):
+            raise RuntimeError(f"twist {row['twist_id']} has inconsistent ky/phiy")
+        expected = 4 if math.isclose(phix, phiy) else 8
+        if int(row["multiplicity"]) != expected:
+            raise RuntimeError(
+                f"twist {row['twist_id']} has multiplicity {row['multiplicity']}, "
+                f"expected {expected}"
+            )
+        weight += expected
+    if weight != int(metadata["effective_twists"]):
+        raise RuntimeError(
+            f"manifest weight {weight} != {metadata['effective_twists']}"
+        )
+    return weight
 
 
 def checkpoint_status(reducer: Path, checkpoint: Path, samples: int, lanczos_steps: int):
@@ -151,6 +183,14 @@ def main():
     active = []
     with manifest.open(newline="") as stream:
         twists = list(csv.DictReader(stream))
+    metadata_path = manifest.with_name("twist_quadrature.json")
+    if not metadata_path.exists():
+        raise SystemExit(f"reduced-BZ quadrature metadata is absent: {metadata_path}")
+    metadata = json.loads(metadata_path.read_text())
+    try:
+        effective_twists = validate_rbz_manifest(twists, metadata)
+    except (KeyError, TypeError, ValueError, RuntimeError) as error:
+        raise SystemExit(f"invalid reduced-BZ manifest: {error}") from error
     if args.twist_id:
         requested = {value.zfill(3) for value in args.twist_id}
         known = {row["twist_id"] for row in twists}
@@ -158,6 +198,7 @@ def main():
         if unknown:
             raise SystemExit(f"unknown twist IDs: {sorted(unknown)}")
         twists = [row for row in twists if row["twist_id"] in requested]
+    selected_weight = sum(int(row["multiplicity"]) for row in twists)
     for row in twists:
         twist_id = row["twist_id"]
         run_dir = root / f"runs/twist_{twist_id}"
@@ -203,6 +244,10 @@ def main():
                 f"TWIST_ID={twist_id}",
                 f"PHIX={row['phix']}",
                 f"PHIY={row['phiy']}",
+                f"TWIST_KX_OVER_PI={row['kx_over_pi']}",
+                f"TWIST_KY_OVER_PI={row['ky_over_pi']}",
+                f"TWIST_MULTIPLICITY={row['multiplicity']}",
+                f"TWIST_QUADRATURE_TAG={metadata['tag']}",
                 f"SEED={row['seed']}",
                 f"TARGET_R={args.samples}",
                 f"FTLM_THREADS={threads}",
@@ -245,7 +290,9 @@ def main():
         f"SUMMARY target_R={args.samples} target_m={args.lanczos_max_steps} "
         f"series={args.checkpoint_series} threads={threads} "
         f"allocated_cpus={allocated_cpus} complete={len(complete)} "
-        f"active={len(active)} submitted={len(submitted)} total={len(twists)}"
+        f"active={len(active)} submitted={len(submitted)} total={len(twists)} "
+        f"quadrature={metadata['tag']} selected_weight={selected_weight} "
+        f"full_effective_twists={effective_twists}"
     )
 
 

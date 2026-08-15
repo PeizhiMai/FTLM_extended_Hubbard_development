@@ -225,8 +225,10 @@ at `R=32` is refused until every stochastic block has IDs `0-31`; lower-R
 reductions remain byte-reproducible after extension. Legacy v1 checkpoints are
 still readable at their original `R`, but are read-only and cannot be extended.
 
-The complete 4x4 CADES workflow, fixed twist manifest, resource gate, wave
-submission, validation, and final plotting are documented in
+The complete 4x4 CADES workflow uses an 8x8 midpoint quadrature of the physical
+cluster reduced Brillouin zone, reduced by sign reflections and axis exchange
+to the 10 representatives `0 < kx <= ky < pi/4`. The fixed manifest, resource
+gate, wave submission, validation, and final plotting are documented in
 `campaigns/lx4_ly4_u7/README.md`.
 
 ## Exact Diagonalization

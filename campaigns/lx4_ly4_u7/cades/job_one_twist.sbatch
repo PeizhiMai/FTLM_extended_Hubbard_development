@@ -30,6 +30,10 @@ LANCZOS_SAVE_STEPS=${LANCZOS_SAVE_STEPS:-}
 # with ':' and the wrapper restores the CLI representation.
 LANCZOS_SAVE_STEPS=${LANCZOS_SAVE_STEPS//:/,}
 CHECKPOINT_SERIES=${CHECKPOINT_SERIES:-legacy}
+TWIST_KX_OVER_PI=${TWIST_KX_OVER_PI:-unknown}
+TWIST_KY_OVER_PI=${TWIST_KY_OVER_PI:-unknown}
+TWIST_MULTIPLICITY=${TWIST_MULTIPLICITY:-unknown}
+TWIST_QUADRATURE_TAG=${TWIST_QUADRATURE_TAG:-legacy}
 BIN_DIR=${BIN_DIR:-"$CAMPAIGN_ROOT/bin"}
 RUN_DIR="$CAMPAIGN_ROOT/runs/twist_$TWIST_ID"
 TARGET_TAG=$(printf '%03d' "$TARGET_R")
@@ -127,10 +131,16 @@ target_R=$TARGET_R
 target_m=$LANCZOS_MAX_STEPS
 lanczos_save_steps=$LANCZOS_SAVE_STEPS
 checkpoint_series=$CHECKPOINT_SERIES
+phix=$PHIX
+phiy=$PHIY
+kx_over_pi=$TWIST_KX_OVER_PI
+ky_over_pi=$TWIST_KY_OVER_PI
+twist_multiplicity=$TWIST_MULTIPLICITY
+twist_quadrature=$TWIST_QUADRATURE_TAG
 requested_memory_gb=250
 started_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
-echo "FTLM_JOB_START utc=$(date -u +%Y-%m-%dT%H:%M:%SZ) host=$(hostname) job=${SLURM_JOB_ID:-} threads=$THREADS memory_gb=250 target_R=$TARGET_R target_m=$LANCZOS_MAX_STEPS save_m=$LANCZOS_SAVE_STEPS series=$CHECKPOINT_SERIES git_commit=$DEPLOYED_COMMIT ftlm_sha256=$FTLM_SHA256"
+echo "FTLM_JOB_START utc=$(date -u +%Y-%m-%dT%H:%M:%SZ) host=$(hostname) job=${SLURM_JOB_ID:-} threads=$THREADS memory_gb=250 target_R=$TARGET_R target_m=$LANCZOS_MAX_STEPS save_m=$LANCZOS_SAVE_STEPS series=$CHECKPOINT_SERIES twist=$TWIST_ID phix=$PHIX phiy=$PHIY kx_over_pi=$TWIST_KX_OVER_PI ky_over_pi=$TWIST_KY_OVER_PI multiplicity=$TWIST_MULTIPLICITY quadrature=$TWIST_QUADRATURE_TAG git_commit=$DEPLOYED_COMMIT ftlm_sha256=$FTLM_SHA256"
 
 child_pid=''
 request_stop() {

@@ -1,0 +1,16 @@
+{
+  "cluster_lx": 4,
+  "cluster_ly": 4,
+  "description": "8x8 midpoint quadrature of the 4x4-cluster reduced Brillouin zone",
+  "effective_twists": 64,
+  "full_domain": "-pi/4 <= kx,ky < pi/4",
+  "grid_nx": 8,
+  "grid_ny": 8,
+  "input_convention": "kx=2*pi*phix/lx; ky=2*pi*phiy/ly",
+  "midpoint_grid": true,
+  "representative_domain": "0 < kx <= ky < pi/4",
+  "representatives": 10,
+  "schema_version": 1,
+  "symmetry": "D4: independent sign reflections and x-y exchange",
+  "tag": "rbz8_midpoint"
+}

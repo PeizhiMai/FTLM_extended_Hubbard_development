@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
+import math
 import subprocess
 import sys
 from collections import defaultdict
@@ -28,6 +30,50 @@ def validate_twist(path: Path):
             raise RuntimeError(f"{path}: negative compressibility at beta={beta}")
 
 
+def validate_manifest(twists, quadrature):
+    if not twists:
+        raise RuntimeError("twist manifest is empty")
+    lx = int(quadrature["cluster_lx"])
+    ly = int(quadrature["cluster_ly"])
+    if lx != 4 or ly != 4:
+        raise RuntimeError(f"expected a 4x4 quadrature, found {lx}x{ly}")
+    if len(twists) != int(quadrature["representatives"]):
+        raise RuntimeError("manifest representative count disagrees with metadata")
+    ids = set()
+    total_weight = 0
+    for row in twists:
+        twist_id = row["twist_id"]
+        if twist_id in ids:
+            raise RuntimeError(f"duplicate twist ID: {twist_id}")
+        ids.add(twist_id)
+        phix = float(row["phix"])
+        phiy = float(row["phiy"])
+        kx_over_pi = float(row["kx_over_pi"])
+        ky_over_pi = float(row["ky_over_pi"])
+        if not (0.0 < phix <= phiy < 0.5):
+            raise RuntimeError(
+                f"twist {twist_id} lies outside 0 < kx <= ky < pi/4: {row}"
+            )
+        if not math.isclose(kx_over_pi, 2.0 * phix / lx, abs_tol=1e-12):
+            raise RuntimeError(f"twist {twist_id} has inconsistent kx/phix")
+        if not math.isclose(ky_over_pi, 2.0 * phiy / ly, abs_tol=1e-12):
+            raise RuntimeError(f"twist {twist_id} has inconsistent ky/phiy")
+        expected_multiplicity = 4 if math.isclose(phix, phiy) else 8
+        multiplicity = int(row["multiplicity"])
+        if multiplicity != expected_multiplicity:
+            raise RuntimeError(
+                f"twist {twist_id} has multiplicity {multiplicity}, "
+                f"expected {expected_multiplicity}"
+            )
+        total_weight += multiplicity
+    expected_weight = int(quadrature["effective_twists"])
+    if total_weight != expected_weight:
+        raise RuntimeError(
+            f"twist multiplicities sum to {total_weight}, expected {expected_weight}"
+        )
+    return total_weight
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--campaign-root", type=Path, required=True)
@@ -35,6 +81,8 @@ def main():
     parser.add_argument("--lanczos-steps", type=int, default=80)
     parser.add_argument("--checkpoint-series", default="legacy")
     parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--manifest", type=Path)
+    parser.add_argument("--quadrature-metadata", type=Path)
     parser.add_argument("--skip-plot", action="store_true")
     args = parser.parse_args()
     root = args.campaign_root.resolve()
@@ -45,14 +93,18 @@ def main():
         if args.checkpoint_series == "legacy"
         else f"m{m_tag}_R{tag}"
     )
-    manifest = root / "source/campaigns/lx4_ly4_u7/twists.csv"
+    campaign_dir = root / "source/campaigns/lx4_ly4_u7"
+    manifest = (args.manifest or campaign_dir / "twists.csv").resolve()
+    metadata_path = (
+        args.quadrature_metadata or campaign_dir / "twist_quadrature.json"
+    ).resolve()
     with manifest.open(newline="") as stream:
         twists = list(csv.DictReader(stream))
-    if not twists:
-        raise SystemExit(f"empty twist manifest: {manifest}")
-    for row in twists:
-        if float(row["phiy"]) < float(row["phix"]):
-            raise SystemExit(f"manifest contains non-representative twist: {row}")
+    quadrature = json.loads(metadata_path.read_text())
+    try:
+        effective_twists = validate_manifest(twists, quadrature)
+    except RuntimeError as error:
+        raise SystemExit(f"invalid reduced-BZ quadrature: {error}") from error
     inputs = [
         root / (
             f"runs/twist_{row['twist_id']}/twist_{row['twist_id']}_thermo_"
@@ -61,10 +113,6 @@ def main():
         for row in twists
     ]
     weights = [int(row.get("multiplicity", "1")) for row in twists]
-    if sum(weights) != 16:
-        raise SystemExit(
-            f"twist symmetry multiplicities sum to {sum(weights)}, expected full-grid weight 16"
-        )
     missing = [str(path) for path in inputs if not path.exists()]
     if missing:
         raise SystemExit("missing twist outputs:\n" + "\n".join(missing))
@@ -74,7 +122,8 @@ def main():
     source = root / "source"
     output_dir = (args.output_dir or root / "averages").resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    average = output_dir / f"twist_average_{result_tag}.csv"
+    quadrature_tag = quadrature["tag"]
+    average = output_dir / f"twist_average_{quadrature_tag}_{result_tag}.csv"
     subprocess.run(
         [
             sys.executable,
@@ -83,7 +132,7 @@ def main():
             "--mode", "observable-average",
             "--weights", ",".join(map(str, weights)),
             "--expected-twists", str(len(inputs)),
-            "--expected-weight", "16",
+            "--expected-weight", str(effective_twists),
             "--output", str(average),
         ],
         check=True,
@@ -100,13 +149,14 @@ def main():
                 sys.executable,
                 str(source / "scripts/plot_compressibility_vs_hole_doping.py"),
                 str(average),
-                "--output", str(output_dir / f"compressibility_vs_x_{result_tag}.png"),
+                "--output",
+                str(output_dir / f"compressibility_vs_x_{quadrature_tag}_{result_tag}.png"),
             ],
             check=True,
         )
     print(
-        f"validated_representatives={len(inputs)} effective_twists={sum(weights)} "
-        f"average={average}"
+        f"quadrature={quadrature_tag} validated_representatives={len(inputs)} "
+        f"effective_twists={effective_twists} average={average}"
     )
 
 
